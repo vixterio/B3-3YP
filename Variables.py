@@ -52,7 +52,7 @@ beta=0.931 #min^-1
 K=0.575 #U/min
 #Glucagon Values
 Vgamma=11310 #ml
-gamma_B=input ["glucagon concentration"]
+#gamma_B=input ["glucagon concentration"]
 #Source and Sinks-Glucose in mg/min
 r_RBCU=10
 r_BGU=70
