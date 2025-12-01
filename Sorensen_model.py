@@ -279,6 +279,6 @@ if __name__ == "__main__":
     plt.plot(t, gpi)
     plt.xlabel("time (min)")
     plt.ylabel("GPI (mg/dL) — peripheral glucose (approx)")
-    plt.title("Sorensen model (Appendix A1) — demo basal sim")
+    plt.title("Sorensen model — demo sim")
     plt.grid(True)
     plt.show()
