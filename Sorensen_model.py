@@ -243,7 +243,7 @@ def simulate(initial_state=None, t_span=(0, 800), t_eval=None, params=None, roga
         x0 = np.zeros(N_STATES)
         # set glucose compartments to ~90-145 mg/dL depending on desired scenario:
         for name in ["GBV","GBI","GH","GJ","GL","GK","GPV","GPI"]:
-            x0[IDX[name]] = 100.0
+            x0[IDX[name]] = 200.0
         # small metabolic/insulin values by default:
         for name in ["MHGP","MHGU","f2"]:
             x0[IDX[name]] = 0.1
