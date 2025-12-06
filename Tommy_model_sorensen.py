@@ -64,7 +64,7 @@ Vgamma=11310 #ml
 
 #USER SUPPLIED BASAL INPUT VALUES
 G_input = 90.0 #glucose concentration
-I_input = 10.0 #insulin concentration
+I_input = 0 #insulin concentration
 gamma_input = 50.0 #glucagon concentration
 
 #METABOLIC SOURCES AND SINKS
@@ -109,19 +109,18 @@ I_B_B = I_H_B
 I_G_B = I_H_B
 I_PI_B = I_PV_B - (Qi_P * Ti_P / Vi_PI) * (I_H_B - I_PV_B)
 I_L_B = (1.0 / Qi_L) * (Qi_H * I_H_B + Qi_B * I_B_B + Qi_K * I_K_B + Qi_P * I_PI_B)
-r_PIR_B = (Qi_L / (1.0 - F_LIC)) * (I_L_B - Qi_B * I_B_B - Qi_G * I_G_B - Qi_H * I_H_B)
+r_PIR_B = 0
 #Model Pancreas
-X_B = (G_H_B ** beta_pir1) / ((beta_pir2 ** beta_pir1) + beta_pir3 * (G_H_B ** beta_pir4))
-P_inf = X_B ** beta
-Y_B = X_B ** beta_pir5
-P_B = P_inf
-I_pancreas_B = X_B
+X_B = 0
+Y_B = 0
+P_inf = 0
+I_pancreas_B = 0
 
 # Eq.104: Q_pancreas_B = (H * Q0 + gamma * P_inf) / (H + M1 * Y_B)
 # The paper uses H, gamma in pancreas equation; in earlier code Q0 used as baseline secretion constant.
 # In the version I used earlier I set Q_pancreas_B = (Q0 + gamma_input * P_inf) / (1 + M1 * Y_B)
 # to keep consistent with earlier script. If I have specific H and gamma scalars, replace accordingly.
-Q_pancreas_B = (Q0 + gamma_input * P_inf) / (1.0 + M1 * Y_B)
+Q_pancreas_B = 0
 
 #Glucagon mass balance
 gamma_B = gamma_input
