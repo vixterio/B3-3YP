@@ -89,6 +89,9 @@ G_PV_B = G_input
 r_PGU = r_PGU_B    
 r_BGU = r_BGU      
 r_CGU = r_JGU      
+#r_PGU = MI_PGU(I_PI_B) * MG_PGU(G_PI_B) * r_PGU_B
+#r_HGU = MI_HGU(I_H_B) * MG_HGU(G_L_B) * r_HGU_B
+#r_HGP = MI_HGP(I_H_B) * MF_HGP(G_H_B) * MG_HGP(G_L_B) * r_HGP_B
 
 
 G_H_B  = G_PV_B + r_PGU / Qg_P
@@ -156,3 +159,6 @@ print(f"X_B = {X_B:.6g}")
 print(f"P_inf = {P_inf:.6g}")
 print(f"Y_B = {Y_B:.6g}")
 print(f"Q_pancreas_B = {Q_pancreas_B:.6g}")
+
+
+#THE NON-LINEAR SORENSEN MODEL
