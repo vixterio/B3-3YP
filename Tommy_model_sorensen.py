@@ -271,14 +271,36 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
 
     # Clearance
     r_MTC = 9.10 * Gamma #eqn 75 mL/min
-
     dGamma = (r_PFR - r_MTC + u_glucagon) / Vgamma #eqn 74
+    
 
     #Metabolic Dynamics (slow regulators) from the original Sorensen model, not included in the Revised Model
     #as they didn't change from the original model
     dM_I_HGP = (1/25.0) * (M_I1_HGP - M_I_HGP)
     dM_I_HGU = (1/25.0) * (M_I1_HGU - M_I_HGU)
     d_f2     = (1/65.0) * (M_G0_HGP - 0.5 - f2)
+
+    #non-negativity clamps, preventing glucose, insulin and glucagon values from becoming negative
+    if G_BV <= 0 and dG_BV < 0: dG_BV = 0
+    if G_BI <= 0 and dG_BI < 0: dG_BI = 0
+    if G_H  <= 0 and dG_H  < 0: dG_H  = 0
+    if G_G  <= 0 and dG_G  < 0: dG_G  = 0
+    if G_L  <= 0 and dG_L  < 0: dG_L  = 0
+    if G_K  <= 0 and dG_K  < 0: dG_K  = 0
+    if G_PV <= 0 and dG_PV < 0: dG_PV = 0
+    if G_PI <= 0 and dG_PI < 0: dG_PI = 0       
+
+    if I_B  <= 0 and dI_B  < 0: dI_B  = 0
+    if I_H  <= 0 and dI_H  < 0: dI_H  = 0
+    if I_G  <= 0 and dI_G  < 0: dI_G  = 0
+    if I_L  <= 0 and dI_L  < 0: dI_L  = 0
+    if I_K  <= 0 and dI_K  < 0: dI_K  = 0
+    if I_PV <= 0 and dI_PV < 0: dI_PV = 0
+    if I_PI <= 0 and dI_PI < 0: dI_PI = 0
+
+    if Gamma < 0 and dGamma < 0:
+        dGamma = 0.0
+
 
     #Return all derivatives
     return np.array([
@@ -308,6 +330,7 @@ initial_state = np.array([
     0.0,    # f2 baseline
     gamma_B # Gamma baseline
 ])
+
 #time span for simualtion (0 to 300 minutes
 t_final = 300.0
 t_eval = np.linspace(0.0,t_final, 601) #every 0.5 minutes
