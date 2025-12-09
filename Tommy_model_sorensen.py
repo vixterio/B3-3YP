@@ -186,11 +186,13 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
     G_PV_N = G_PV / G_PV_B
     G_PI_N = G_PI / G_PI_B
 
-    I_B_N  = I_B  / max(I_B_B, 1e-12) #the max function makes sure it never divides by 0, if I_B_B=0 then it will divide by 1e-12
-    I_H_N  = I_H  / max(I_H_B, 1e-12)
-    I_G_N  = I_G  / max(I_G_B, 1e-12)
-    I_L_N  = I_L  / max(I_L_B, 1e-12)
-    I_PI_N = I_PI / max(I_PI_B, 1e-12)
+    I_norm = 10.0 #μU/mL fixed reference insulin concentration for normalisation
+    I_H_N  = I_H  / (I_norm + 1e-6)
+    I_PI_N = I_PI / (I_norm + 1e-6)
+    I_L_N  = I_L  / (I_norm + 1e-6)
+    I_G_N  = I_G  / (I_norm + 1e-6)
+    I_B_N  = I_B  / (I_norm + 1e-6)
+
 
     # nonlinear metabolic flux functions
     #PGU (peripheral uptake)
@@ -315,7 +317,7 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
 #EXAMPLE INPUT FUNCTIONS FOR EXTERNAL INFUSIONS
 def u1_insulin(t):
     #example: no external insulin infusion 0mU/min
-    return 0.0
+    return 1.0
 
 def u2_glucagon(t):
     #example: no external glucagon infusion 0pg/min
@@ -358,7 +360,7 @@ plt.legend()
 plt.grid(True)
 
 plt.figure(figsize=(10,6))
-plt.plot(sol.t, sol.y[9],  label="I_H (heart insulin) -- index 9")
+plt.plot(sol.t, sol.y[8],  label="I_B_B -- index 8")
 plt.xlabel("Time (min)")
 plt.ylabel("Insulin (μU/mL)")
 plt.title("Insulin compartments")
