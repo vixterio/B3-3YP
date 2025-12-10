@@ -27,22 +27,22 @@ Tg_B=2.1
 Tg_P=5
 
 #Insulin values indicated by the I
-#Volume is in L
-Vi_B=0.26
-Vi_H=0.99
-Vi_G=0.94
-Vi_L=1.14
-Vi_K=0.51
-Vi_PV=0.74
-Vi_PI=6.74
-#Flow rate in L/min
-Qi_B=0.45
-Qi_H=3.12
-Qi_A=0.18
-Qi_K=0.72
-Qi_P=1.05
-Qi_G=0.72
-Qi_L=0.90
+#Volume is in mL
+Vi_B=0.26*1000
+Vi_H=0.99*1000
+Vi_G=0.94*1000
+Vi_L=1.14*1000
+Vi_K=0.51*1000
+Vi_PV=0.74*1000
+Vi_PI=6.74*1000
+#Flow rate in mL/min
+Qi_B=0.45*1000
+Qi_H=3.12*1000
+Qi_A=0.18*1000
+Qi_K=0.72*1000
+Qi_P=1.05*1000
+Qi_G=0.72*1000
+Qi_L=0.90*1000
 #Random constants
 Ti_P=20 #minutes
 beta_pir1=3.27
@@ -65,7 +65,7 @@ Vgamma=11310 #ml
 #USER SUPPLIED BASAL INPUT VALUES
 G_input = 90.0 #glucose concentration
 I_input = 0 #insulin concentration
-gamma_input = 50.0 #glucagon concentration
+gamma_input = 50.0 #glucagon concentration pg/mL
 
 #METABOLIC SOURCES AND SINKS
 F_LIC = 0.40
@@ -128,6 +128,7 @@ Q_pancreas_B = 0 #eqn 104
 
 #Glucagon mass balance
 gamma_B = gamma_input #eqn 105
+r_PFR_B = 9.10 * gamma_B #pg/min baseline production eqn 76
 
 
 
@@ -261,7 +262,9 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
     #simplified version of eqn 65, used because the original equation's denominator can become
     #unstable when insulin is zero or ver small. 
     r_PIC_val = F_PIC * Qi_P * I_PI #eqn 65
-    dI_PI = ((Vi_PI/Ti_P)*(I_PV - I_PI) - r_PIC_val + u_insulin) / Vi_PI #eqn 60
+
+    u_insulin_conc_rate = u_insulin / Vi_PI 
+    dI_PI = ((Vi_PI/Ti_P)*(I_PV - I_PI) - r_PIC_val)/Vi_PI + u_insulin_conc_rate #eqn 60 
 
     #equations 67-73 are part of the pancreas (beta-cell) submodel, which is not used in T1D
 
@@ -269,11 +272,13 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
     # Production
     M_G_PFR = 2.93 - 2.10 * np.tanh(4.18 * (G_H_N - 0.61)) #eqn 78
     M_I_PFR = 1.31 - 0.61 * np.tanh(1.06 * (I_H_N - 0.47)) #eqn 79
-    r_PFR = M_G_PFR * M_I_PFR * 1.0 #eqn 77, using baseline production rate of 1.0 pg/min
+    # production (mass flow, pg/min) using baseline r_PFR_B
+    r_PFR = M_G_PFR * M_I_PFR * r_PFR_B    #pg/min eqn 77
 
     # Clearance
-    r_MTC = 9.10 * Gamma #eqn 75 mL/min
-    dGamma = (r_PFR - r_MTC + u_glucagon) / Vgamma #eqn 74
+    r_MTC = 9.10 * Gamma #eqn 75 mL/min -> pg/min (by multiplying by gamma)
+    u_glucagon_conc_rate = u_glucagon / Vgamma #convert pg/min to pg/mL concentration
+    dGamma = (r_PFR - r_MTC) / Vgamma + u_glucagon_conc_rate #eqn 74
     
 
     #Metabolic Dynamics (slow regulators) from the original Sorensen model, not included in the Revised Model
@@ -290,7 +295,7 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
     if G_L  <= 0 and dG_L  < 0: dG_L  = 0
     if G_K  <= 0 and dG_K  < 0: dG_K  = 0
     if G_PV <= 0 and dG_PV < 0: dG_PV = 0
-    if G_PI <= 0 and dG_PI < 0: dG_PI = 0       
+    if G_PI <= 0 and dG_PI < 0: dG_PI = 0      
 
     if I_B  <= 0 and dI_B  < 0: dI_B  = 0
     if I_H  <= 0 and dI_H  < 0: dI_H  = 0
@@ -316,12 +321,12 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
 
 #EXAMPLE INPUT FUNCTIONS FOR EXTERNAL INFUSIONS
 def u1_insulin(t):
-    #example: no external insulin infusion 0mU/min
-    return 1.0
+    #μU/min
+    return 1
 
 def u2_glucagon(t):
-    #example: no external glucagon infusion 0pg/min
-    return 0.0
+    #pg/min
+    return 0
 
 #build the initial state vector (must match sorensen_odes unpack order)
 initial_state = np.array([
@@ -350,6 +355,19 @@ sol = solve_ivp(
 if not sol.success:
     raise RuntimeError("Integration failed: " + sol.message)
 
+
+#UNITS
+#glucose concentration: mg/dL
+#insulin concentration: μU/mL
+#glucagon concentration: pg/mL
+#glucose volume: dL
+#insulin volume: mL (changed from L to mL for consistency)
+#glucagon volume: mL
+#glucose flow rates: dL/min
+#insulin flow rates: L/min
+#insulin infusion rate: μU/min (mass flow) must be converted to concentration: (/Vi_PI*1000) in ODEs
+#glucagon infusion rate: pg/min (mass flow) must be converted to concentration: (/Vgamma) in ODEs
+
 #Plotting glucose, insulin, glucagon results
 plt.figure(figsize=(10,6))
 plt.plot(sol.t, sol.y[7], label="G_PI (periph interstitial glucose) -- index 7")
@@ -359,11 +377,22 @@ plt.title("Glucose compartments")
 plt.legend()
 plt.grid(True)
 
+
 plt.figure(figsize=(10,6))
-plt.plot(sol.t, sol.y[8],  label="I_B_B -- index 8")
+labels = [
+    "I_B (Brain insulin)",
+    "I_H (Heart/Lung insulin)",
+    "I_G (Gut insulin)",
+    "I_L (Liver insulin)",
+    "I_K (Kidney insulin)",
+    "I_PV (Peripheral vascular insulin)",
+    "I_PI (Peripheral interstitial insulin)",
+]
+for idx, label in zip(range(8, 15), labels):
+    plt.plot(sol.t, sol.y[idx], label=f"{label} -- index {idx}")
 plt.xlabel("Time (min)")
 plt.ylabel("Insulin (μU/mL)")
-plt.title("Insulin compartments")
+plt.title("All Insulin Compartments")
 plt.legend()
 plt.grid(True)
 

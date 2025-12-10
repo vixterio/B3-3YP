@@ -27,22 +27,22 @@ Tg_B=2.1
 Tg_P=5
 
 #Insulin values indicated by the I
-#Volume is in L
-Vi_B=0.26
-Vi_H=0.99
-Vi_G=0.94
-Vi_L=1.14
-Vi_K=0.51
-Vi_PV=0.74
-Vi_PI=6.74
-#Flow rate in L/min
-Qi_B=0.45
-Qi_H=3.12
-Qi_A=0.18
-Qi_K=0.72
-Qi_P=1.05
-Qi_G=0.72
-Qi_L=0.90
+#Volume is in mL
+Vi_B=0.26 * 1000
+Vi_H=0.99 * 1000
+Vi_G=0.94 * 1000
+Vi_L=1.14 * 1000
+Vi_K=0.51 * 1000
+Vi_PV=0.74 * 1000
+Vi_PI=6.74 * 1000
+#Flow rate in mL/min
+Qi_B=0.45 * 1000
+Qi_H=3.12 * 1000
+Qi_A=0.18 * 1000
+Qi_K=0.72 * 1000
+Qi_P=1.05 * 1000
+Qi_G=0.72 * 1000
+Qi_L=0.90 * 1000
 #Random constants
 Ti_P=20 #minutes
 beta_pir1=3.27
@@ -63,7 +63,7 @@ Vgamma=11310 #ml
 
 
 #USER SUPPLIED BASAL INPUT VALUES
-G_input = 90.0 #glucose concentration
+G_input = 90.0 #glucose concentration  mg/dL
 I_input = 0 #insulin concentration
 gamma_input = 50.0 #glucagon concentration
 
@@ -79,40 +79,69 @@ r_JGU = 20.0 #cardiac (gut/intestinal) uptake mg/min eqn 33
 r_PGU_B = 35.0 #baseline peripheral glucose uptake mg/min eqn 35
 r_HGP_B = 155.0 #baseline hepatic glucose production mg/min eqn 155
 r_HGU_B = 20.0 #baseline hepatic glucose uptake mg/min eqn 49
-
+r_CGU = r_JGU
 
 #INITIAL CONDITIONS
 #Glucose mass balance
 G_PV_B = G_input   #eqn 80
 
-# For initial steady-state we use the baseline flux values r^B_* from the paper:
-r_PGU = r_PGU_B    
-r_BGU = r_BGU      
-r_CGU = r_JGU      
-#r_PGU = MI_PGU(I_PI_B) * MG_PGU(G_PI_B) * r_PGU_B
-#r_HGU = MI_HGU(I_H_B) * MG_HGU(G_L_B) * r_HGU_B
-#r_HGP = MI_HGP(I_H_B) * MF_HGP(G_H_B) * MG_HGP(G_L_B) * r_HGP_B
 
 
-G_H_B  = G_PV_B + r_PGU / Qg_P #eqn 81
-G_K_B  = G_H_B #eqn 82
-G_BV_B = G_H_B - r_BGU / Qg_B #eqn 83
-G_G_B  = G_H_B - r_CGU / Qg_G #eqn 84
-r_B_HGP = r_HGP_B
-r_B_HGU = r_HGU_B
-#the paper has a typographical error as it uses 1/G_B_L instead of 1/Vg_L in eqn 85
-G_L_B = (1.0 / Vg_L) * (Qg_A * G_H_B + Qg_G * G_G_B + r_B_HGP - r_B_HGU) #eqn 85
-G_BI_B = G_BV_B - (r_BGU * Tg_B) / Vg_BI #eqn 86
-G_PI_B = G_PV_B - (r_PGU * Tg_P) / Vg_PI #eqn 87
+
+
+
 
 #Insulin mass balance
-I_PV_B = I_input #eqn 91
+I_PV_B = I_input #eqn 91 mg/dL
 I_H_B = I_PV_B / (1.0 - F_PIC) #eqn 92
 I_K_B = I_H_B * (1.0 - F_KIC) #eqn 93
 I_B_B = I_H_B #eqn 94
 I_G_B = I_H_B #eqn 95
 I_PI_B = I_PV_B - (Qi_P * Ti_P / Vi_PI) * (I_H_B - I_PV_B) #eqn 96
 I_L_B = (1.0 / Qi_L) * (Qi_H * I_H_B + Qi_B * I_B_B + Qi_K * I_K_B + Qi_P * I_PI_B) #eqn 97
+
+
+
+# Normalisation for baseline (normalized glucose = 1 by definition at steady-state)
+I_norm = 10.0
+I_PI_N = I_PI_B / I_norm
+I_L_N  = I_L_B  / I_norm
+
+G_PI_N = 1.0
+G_L_N  = 1.0
+G_H_N  = 1.0
+
+# PGU modulation
+M_I_PGU = 7.03 + 6.52 * np.tanh(0.338 * (I_PI_N - 5.82))
+M_G_PGU = G_PI_N
+r_PGU = M_I_PGU * M_G_PGU * r_PGU_B
+
+# HGP modulation
+M_I1_HGP = 1.21 - 1.14 * np.tanh(1.66 * (I_L_N - 0.89))
+M_G0_HGP = 2.7 * np.tanh(0.39 * G_H_N)
+f2 = 0.5
+M_F_HGP  = M_G0_HGP - f2
+M_G_HGP  = 1.42 - 1.41 * np.tanh(0.62 * (G_L_N - 0.497))
+r_HGP = M_I1_HGP * M_F_HGP * M_G_HGP * r_HGP_B
+
+# HGU modulation
+M_I1_HGU = 2.0 * np.tanh(0.55 * I_L_N)
+M_G_HGU  = 5.66 + 5.66 * np.tanh(2.44 * (G_L_N - 1.48))
+r_HGU = M_I1_HGU * M_G_HGU * r_HGU_B
+
+
+# Revised Sorensen steady-state glucose = physiological fasting glucose
+G_BV_B = G_input
+G_BI_B = G_input
+G_H_B  = G_input
+G_G_B  = G_input
+G_L_B  = G_input
+G_K_B  = G_input
+G_PV_B = G_input
+G_PI_B = G_input
+
+
+
 r_PIR_B = 0 #No pancreatic insulin release in T1D eqn 98
 #Model Pancreas
 X_B = 0 #eqn 99
@@ -128,6 +157,12 @@ Q_pancreas_B = 0 #eqn 104
 
 #Glucagon mass balance
 gamma_B = gamma_input #eqn 105
+
+
+
+
+
+
 
 
 
@@ -164,6 +199,9 @@ print(f"Q_pancreas_B = {Q_pancreas_B:.6g}")
 
 
 
+
+
+
 #THE NON-LINEAR SORENSEN MODEL (from the 'Revised Sorensen Model' paper)
 def sorensen_odes(t, y, u_insulin, u_glucagon):
     """
@@ -186,11 +224,12 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
     G_PV_N = G_PV / G_PV_B
     G_PI_N = G_PI / G_PI_B
 
-    I_B_N  = I_B  / max(I_B_B, 1e-12) #the max function makes sure it never divides by 0, if I_B_B=0 then it will divide by 1e-12
-    I_H_N  = I_H  / max(I_H_B, 1e-12)
-    I_G_N  = I_G  / max(I_G_B, 1e-12)
-    I_L_N  = I_L  / max(I_L_B, 1e-12)
-    I_PI_N = I_PI / max(I_PI_B, 1e-12)
+    I_norm = 10 #μU/mL fixed reference insulin concentration for normalisation
+    I_H_N  = I_H  / (I_norm + 1e-6)
+    I_PI_N = I_PI / (I_norm + 1e-6)
+    I_L_N  = I_L  / (I_norm + 1e-6)
+    I_G_N  = I_G  / (I_norm + 1e-6)
+    I_B_N  = I_B  / (I_norm + 1e-6)
 
     # nonlinear metabolic flux functions
     #PGU (peripheral uptake)
@@ -280,6 +319,27 @@ def sorensen_odes(t, y, u_insulin, u_glucagon):
     dM_I_HGU = (1/25.0) * (M_I1_HGU - M_I_HGU)
     d_f2     = (1/65.0) * (M_G0_HGP - 0.5 - f2)
 
+    #non-negativity clamps, preventing glucose, insulin and glucagon values from becoming negative
+    if G_BV <= 0 and dG_BV < 0: dG_BV = 0
+    if G_BI <= 0 and dG_BI < 0: dG_BI = 0
+    if G_H  <= 0 and dG_H  < 0: dG_H  = 0
+    if G_G  <= 0 and dG_G  < 0: dG_G  = 0
+    if G_L  <= 0 and dG_L  < 0: dG_L  = 0
+    if G_K  <= 0 and dG_K  < 0: dG_K  = 0
+    if G_PV <= 0 and dG_PV < 0: dG_PV = 0
+    if G_PI <= 0 and dG_PI < 0: dG_PI = 0      
+
+    if I_B  <= 0 and dI_B  < 0: dI_B  = 0
+    if I_H  <= 0 and dI_H  < 0: dI_H  = 0
+    if I_G  <= 0 and dI_G  < 0: dI_G  = 0
+    if I_L  <= 0 and dI_L  < 0: dI_L  = 0
+    if I_K  <= 0 and dI_K  < 0: dI_K  = 0
+    if I_PV <= 0 and dI_PV < 0: dI_PV = 0
+    if I_PI <= 0 and dI_PI < 0: dI_PI = 0
+
+    if Gamma < 0 and dGamma < 0:
+        dGamma = 0.0
+
     #Return all derivatives
     return np.array([
         dG_BV, dG_BI, dG_H, dG_G, dG_L, dG_K, dG_PV, dG_PI,
@@ -303,9 +363,9 @@ def u2_glucagon(t):
 initial_state = np.array([
     G_BV_B, G_BI_B, G_H_B, G_G_B, G_L_B, G_K_B, G_PV_B, G_PI_B,
     I_B_B, I_H_B, I_G_B, I_L_B, I_K_B, I_PV_B, I_PI_B,
-    1.0,    # M_I_HGP baseline (unitless)
-    1.0,    # M_I_HGU baseline (unitless)
-    0.0,    # f2 baseline
+    M_I1_HGP,    # M_I_HGP baseline (unitless)
+    M_I1_HGU,    # M_I_HGU baseline (unitless)
+    f2,    # f2 baseline
     gamma_B # Gamma baseline
 ])
 #time span for simualtion (0 to 300 minutes
@@ -351,3 +411,6 @@ plt.legend()
 plt.grid(True)
 
 plt.show()
+
+dy0 = sorensen_odes(0, initial_state, 0, 0)
+print(dy0)
