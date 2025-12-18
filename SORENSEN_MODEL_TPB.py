@@ -270,6 +270,7 @@ def sorensen_odes(t, y):
     M_G_PFR = float(2.93 - 2.10 * np.tanh(4.18 * (GN_H - 0.61)))
     M_I_PFR = float(1.31 - 0.61 * np.tanh(1.06 * (IN_H - 0.47)))
     r_MTC = 9.10 * Gamma  #pg/min
+    #rB_PFR = 0.3 * r_MTC
     r_PFR = rB_PFR * M_I_PFR * M_G_PFR #pg/min 
     dGamma = (r_PFR - r_MTC + uG) / V_gamma #eq 74
 
