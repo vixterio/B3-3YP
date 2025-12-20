@@ -115,7 +115,7 @@ GB_BI = GB_BV - (rB_BGU*Tg_B)/Vg_BI #mg/dL
 GB_PI = GB_PV - (rB_PGU*Tg_P)/Vg_PI #mg/dL
 
 #steady state insulin initial conditions
-IB_PV = 0.5  #uU/L [input insulin concentration]
+IB_PV = 10000     #uU/L [input insulin concentration]
 IB_H = IB_PV/(1-F_PIC) #uU/L
 IB_K = IB_H*(1-F_KIC)
 IB_B = IB_H
