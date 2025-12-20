@@ -115,7 +115,7 @@ GB_BI = GB_BV - (rB_BGU*Tg_B)/Vg_BI #mg/dL
 GB_PI = GB_PV - (rB_PGU*Tg_P)/Vg_PI #mg/dL
 
 #steady state insulin initial conditions
-IB_PV = 0.5  #uU/L [input insulin concentration]
+IB_PV = 10000     #uU/L [input insulin concentration]
 IB_H = IB_PV/(1-F_PIC) #uU/L
 IB_K = IB_H*(1-F_KIC)
 IB_B = IB_H
@@ -161,20 +161,22 @@ initial_conditions = { # Glucose
     "Gamma":   gamma_B
 }
 
-#printing initial conditions
-#pprint(initial_conditions)
 
 
 
 
 
-#exogenous insulin
-def u_insulin(t):       
-    return 1000                   #microU/min
 
-#exogenous glucagon
-def u_glucagon(t):
-    return 30000                   #pg/min
+#defining a basic controller to enable us to find an equilibrium point because the system is not open loop stable
+G_target = 90.0  # mg/dL
+
+def temporary_controller(y):
+    Kp_I = 5            # µU/min per mg/dL
+    Kp_G = 10           # pg/min per mg/dL
+    G_PI = y[7] 
+    u_ins  = max(0.0,  Kp_I * (G_PI - G_target))
+    u_gluc = max(0.0,  Kp_G * (G_target - G_PI))
+    return u_ins, u_gluc
 
 
 
@@ -184,11 +186,10 @@ def u_glucagon(t):
 
 #compute metabolic fluxes -> compute glucose derivatives -> compute insulin derivatives -> compute regulator and glucagon derivatives
 
-def sorensen_odes(t, y):
+def sorensen_odes(t, y, uI, uG):
     #y is 19 state vector, u_insulin and u_glucagon are exogenous insulin and glucagon infusions respectively
     #calling exogenous functions
-    uI = u_insulin(t)
-    uG = u_glucagon(t)
+   
     #unpack state vector
     (G_PV, G_H, G_K, G_BV, G_G, G_L, G_BI, G_PI, I_PV, I_H, I_K, I_B, I_G, I_PI, I_L, M_I_HGP, M_I_HGU, f2, Gamma) = y
 
@@ -323,16 +324,19 @@ def sorensen_odes(t, y):
 
 
 #time span for simulation
-t_final = 1000
+t_final = 1500
 t_eval = np.linspace(0.0,t_final, 2001) #every 0.5 minutes
 
+def closed_loop_odes(t, y):
+    uI, uG = temporary_controller(y)
+    return sorensen_odes(t, y, uI, uG)
 
 
 
 
 #SOLVING THE ODEs
-y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
-sol = solve_ivp(
+#y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
+#sol = solve_ivp(
     sorensen_odes,
     (0.0, t_final),
     y0,
@@ -340,7 +344,30 @@ sol = solve_ivp(
     t_eval=t_eval,
     rtol=1e-6,
     atol=1e-8
+#)
+
+y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
+sol = solve_ivp(
+    closed_loop_odes,
+    (0.0, t_final),
+    y0,
+    method="RK45",
+    t_eval=t_eval,
+    rtol=1e-6,
+    atol=1e-8
 )
+
+x_star = sol.y[:, -1]
+u_star = temporary_controller(x_star)
+
+#printing equilibrium point
+print("x* (final glucose):", x_star[7], "mg/dL")
+print("u* (insulin, glucagon):", u_star)
+
+residual = sorensen_odes(0.0, x_star, u_star[0], u_star[1])
+print("||f(x*,u*)|| =", np.linalg.norm(residual))
+
+
 
 #PLOTS
 #G_PI 
@@ -370,5 +397,35 @@ plt.title("Insulin")
 plt.legend()
 plt.grid(True)
 plt.show()
+
+
+
+
+
+#computing matrices A and B for linearised model around (x*, u*)
+#matrix A
+def compute_A(x_star, u_star, eps=1e-6):
+    n = len(x_star)
+    A = np.zeros((n, n))
+
+    # baseline derivative
+    f0 = sorensen_odes(0.0, x_star, u_star[0], u_star[1])
+
+    for j in range(n):
+        dx = np.zeros(n)
+        dx[j] = eps
+
+        f1 = sorensen_odes(0.0, x_star + dx, u_star[0], u_star[1])
+        A[:, j] = (f1 - f0) / eps
+
+    return A
+
+
+
+A = compute_A(x_star, u_star)
+#checking matrix A is the correct shape ie 19x19
+print("A shape:", A.shape)
+
+
 
 
