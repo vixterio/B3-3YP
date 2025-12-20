@@ -335,17 +335,6 @@ def closed_loop_odes(t, y):
 
 
 #SOLVING THE ODEs
-#y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
-#sol = solve_ivp(
-    sorensen_odes,
-    (0.0, t_final),
-    y0,
-    method="RK45",
-    t_eval=t_eval,
-    rtol=1e-6,
-    atol=1e-8
-#)
-
 y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
 sol = solve_ivp(
     closed_loop_odes,
@@ -401,7 +390,7 @@ plt.show()
 
 
 
-
+#MATRICES FOR LINEARISED MODEL
 #computing matrices A and B for linearised model around (x*, u*)
 #matrix A
 def compute_A(x_star, u_star, eps=1e-6):
@@ -427,5 +416,31 @@ A = compute_A(x_star, u_star)
 print("A shape:", A.shape)
 
 
+x = np.linalg.norm(A)  #just to see the Frobenius norm of A
+print(x)
+y=np.linalg.eigvals(A) #checking eigenvalues of A to check there are no NaNs or Infs
+print(y) #all eigenvalues have negative real parts -> operating point is locally stable
 
+#matrix B
+def compute_B(x_star, u_star, eps=1.0):
+    n = len(x_star)
+    B = np.zeros((n, 2))
 
+    # baseline derivative
+    f0 = sorensen_odes(0.0, x_star, u_star[0], u_star[1])
+
+    # insulin channel
+    f_ins = sorensen_odes(0.0, x_star, u_star[0] + eps, u_star[1])
+    B[:, 0] = (f_ins - f0) / eps
+
+    # glucagon channel
+    f_gluc = sorensen_odes(0.0, x_star, u_star[0], u_star[1] + eps)
+    B[:, 1] = (f_gluc - f0) / eps
+
+    return B
+
+B = compute_B(x_star, u_star)
+#checking to see B is the correct shape ie 19x2
+print("B shape:", B.shape)
+
+print("B[7, :] =", B[7, :]) #sanity check
