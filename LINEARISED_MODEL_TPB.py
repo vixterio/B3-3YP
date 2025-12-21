@@ -323,6 +323,10 @@ def sorensen_odes(t, y, uI, uG):
 
 
 
+
+
+#SOLVING THE ODEs
+
 #time span for simulation
 t_final = 1500
 t_eval = np.linspace(0.0,t_final, 2001) #every 0.5 minutes
@@ -332,9 +336,6 @@ def closed_loop_odes(t, y):
     return sorensen_odes(t, y, uI, uG)
 
 
-
-
-#SOLVING THE ODEs
 y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
 sol = solve_ivp(
     closed_loop_odes,
@@ -355,6 +356,10 @@ print("u* (insulin, glucagon):", u_star)
 
 residual = sorensen_odes(0.0, x_star, u_star[0], u_star[1])
 print("||f(x*,u*)|| =", np.linalg.norm(residual))
+
+
+
+
 
 
 
@@ -386,6 +391,8 @@ plt.title("Insulin")
 plt.legend()
 plt.grid(True)
 plt.show()
+
+
 
 
 
@@ -463,3 +470,16 @@ print("Rank of controllability matrix:", matrix_rank(Ctrb))
 for k in range(1,6):
     print(f"k={k}, (A^{k}B)[7,:] =",
           (np.linalg.matrix_power(A,k) @ B)[7,:])
+    
+
+#matrix C
+#picking output as G_PI only as this is the only state the sensor measures
+C = np.zeros((1, 19))
+C[0, 7] = 1.0   # G_PI
+
+# DIRECT FEEDTHROUGH (physiologically zero)
+D = np.zeros((1, 2))
+
+print("C shape:", C.shape)
+print("D shape:", D.shape)
+
