@@ -444,3 +444,22 @@ B = compute_B(x_star, u_star)
 print("B shape:", B.shape)
 
 print("B[7, :] =", B[7, :]) #sanity check
+
+
+#check controllability of (A,B)
+#we are not expecting full controllability here due to physiological constraints (many states are passive 
+#transport compartments) but we want to see how insulin and glucagon influence G_PI state
+from numpy.linalg import matrix_rank
+Ctrb = np.hstack([
+    B,
+    A @ B,
+    A @ A @ B,
+    A @ A @ A @ B,
+    A @ A @ A @ A @ B
+])
+print("Rank of controllability matrix:", matrix_rank(Ctrb))
+
+#checking influence of insulin and glucagon on G_PI state in linearised model
+for k in range(1,6):
+    print(f"k={k}, (A^{k}B)[7,:] =",
+          (np.linalg.matrix_power(A,k) @ B)[7,:])
