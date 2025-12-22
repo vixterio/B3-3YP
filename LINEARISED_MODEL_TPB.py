@@ -161,7 +161,7 @@ initial_conditions = { # Glucose
     "Gamma":   gamma_B
 }
 
-
+print(initial_conditions)
 
 
 
@@ -483,3 +483,34 @@ D = np.zeros((1, 2))
 print("C shape:", C.shape)
 print("D shape:", D.shape)
 
+
+
+
+#G1(S) NOW DEFINED AS (A,B,C,D)
+#NEED TO DEVELOP G2(S) TO MODEL THE SENSOR
+
+
+
+#SENSOR
+tau_s = 5.0  # minutes
+
+# Augmented A matrix
+A_aug = np.zeros((20, 20))
+A_aug[:19, :19] = A
+A_aug[19, 7] = 1.0 / tau_s     # G_PI -> CGM
+A_aug[19, 19] = -1.0 / tau_s  # CGM decay
+
+# Augmented B matrix
+B_aug = np.zeros((20, 2))
+B_aug[:19, :] = B
+
+# Measurement matrix
+C_aug = np.zeros((1, 20))
+C_aug[0, 19] = 1.0   # CGM output
+
+D_aug = np.zeros((1, 2))
+
+#sanity check
+print(A_aug.shape)  # (20, 20)
+print(B_aug.shape)  # (20, 2)
+print(C_aug.shape)  # (1, 20)
