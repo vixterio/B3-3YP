@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 from typing import Callable, Sequence
 from pprint import pprint
+from numpy.linalg import matrix_rank
 
 #Model is based only on Revised Sorensen Model paper
 
@@ -514,3 +515,57 @@ D_aug = np.zeros((1, 2))
 print(A_aug.shape)  # (20, 20)
 print(B_aug.shape)  # (20, 2)
 print(C_aug.shape)  # (1, 20)
+
+
+
+
+#checking glucose and CGM states are observable, only hormones and regulators should be unobservable
+#number of augmented states
+n_aug = A_aug.shape[0]
+
+# Build observability matrix
+Obs = C_aug.copy()
+CA = C_aug.copy()
+
+for k in range(1, n_aug):
+    CA = CA @ A_aug
+    Obs = np.vstack((Obs, CA))
+
+rank_obs = matrix_rank(Obs, tol=1e-8)
+
+print("Observability matrix shape:", Obs.shape)
+print("Observability rank:", rank_obs)
+
+
+
+
+# SVD of observability matrix
+U, S, Vh = np.linalg.svd(Obs)
+
+# tolerance for zero singular values
+tol = 1e-8
+n_unobs = np.sum(S < tol)
+
+print("Number of unobservable modes:", n_unobs)
+
+# Nullspace basis (each column is an unobservable direction)
+nullspace = Vh.T[:, -n_unobs:]
+
+print("Nullspace shape:", nullspace.shape)
+
+state_names = STATE_ORDER + ["CGM"]
+
+for k in range(nullspace.shape[1]):
+    print(f"\nUnobservable mode {k}:")
+    for i, name in enumerate(state_names):
+        coeff = nullspace[i, k]
+        if abs(coeff) > 0.1:   # threshold for significance
+            print(f"  {name:15s}: {coeff:+.3f}")
+
+
+#next step is to design and run Kalman filter on the linearised augmented model
+#step 1 is choose covariance matrices Q and R for the measurement and process noise
+#step 2 is to compute the Kalman gain L
+#step 3 is to simulate the Kalman filter 
+#step 4 is to compare true glucose, measured CGM and estimated glucose from Kalman filter
+
