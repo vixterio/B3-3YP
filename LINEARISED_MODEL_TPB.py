@@ -4,6 +4,7 @@ from scipy.integrate import solve_ivp
 from typing import Callable, Sequence
 from pprint import pprint
 from numpy.linalg import matrix_rank
+from scipy.linalg import solve_continuous_are
 
 #Model is based only on Revised Sorensen Model paper
 
@@ -364,34 +365,34 @@ print("||f(x*,u*)|| =", np.linalg.norm(residual))
 
 
 
-#PLOTS
-#G_PI 
-plt.figure(figsize=(10,6))
-plt.plot(sol.t, sol.y[7], label="G_PI (periph interstitial glucose) -- index 7")
-plt.xlabel("Time (min)")
-plt.ylabel("Glucose (mg/dL)")
-plt.title("Glucose compartments")
-plt.legend()
-plt.grid(True)
+# #PLOTS
+# #G_PI 
+# plt.figure(figsize=(10,6))
+# plt.plot(sol.t, sol.y[7], label="G_PI (periph interstitial glucose) -- index 7")
+# plt.xlabel("Time (min)")
+# plt.ylabel("Glucose (mg/dL)")
+# plt.title("Glucose compartments")
+# plt.legend()
+# plt.grid(True)
 
-#Glucagon
-plt.figure(figsize=(10,4))
-plt.plot(sol.t, sol.y[18], label="Gamma (glucagon) -- index 18")
-plt.xlabel("Time (min)")
-plt.ylabel("Glucagon (pg/mL)")
-plt.title("Glucagon")
-plt.legend()
-plt.grid(True)
+# #Glucagon
+# plt.figure(figsize=(10,4))
+# plt.plot(sol.t, sol.y[18], label="Gamma (glucagon) -- index 18")
+# plt.xlabel("Time (min)")
+# plt.ylabel("Glucagon (pg/mL)")
+# plt.title("Glucagon")
+# plt.legend()
+# plt.grid(True)
 
-#Insulin
-plt.figure(figsize=(10,4))
-plt.plot(sol.t, sol.y[8], label="I_PV -- index 8")
-plt.xlabel("Time (min)")
-plt.ylabel("Insulin (μU/L)")
-plt.title("Insulin")
-plt.legend()
-plt.grid(True)
-plt.show()
+# #Insulin
+# plt.figure(figsize=(10,4))
+# plt.plot(sol.t, sol.y[8], label="I_PV -- index 8")
+# plt.xlabel("Time (min)")
+# plt.ylabel("Insulin (μU/L)")
+# plt.title("Insulin")
+# plt.legend()
+# plt.grid(True)
+# plt.show()
 
 
 
@@ -488,12 +489,12 @@ print("D shape:", D.shape)
 
 
 #G1(S) NOW DEFINED AS (A,B,C,D)
-#NEED TO DEVELOP G2(S) TO MODEL THE SENSOR
+#NEED TO DEVELOP SENSOR NOW
 
 
 
 #SENSOR
-tau_s = 5.0  # minutes
+tau_s = 5.0  # minutes    NEED TO CITE THIS FROM LITERATURE
 
 # Augmented A matrix
 A_aug = np.zeros((20, 20))
@@ -569,3 +570,136 @@ for k in range(nullspace.shape[1]):
 #step 3 is to simulate the Kalman filter 
 #step 4 is to compare true glucose, measured CGM and estimated glucose from Kalman filter
 
+
+#choosing covariance matrices Q and R
+#Q is uncertainty in physiological model
+#R is sensor noise
+
+#R, measurement noise covariance matrix
+sigma_cgm = 5.0          # mg/dL
+R = np.array([[sigma_cgm**2]])   # 1x1
+
+
+#Q, process noise covariance matrix
+Q = np.zeros((20, 20))
+
+state_names = STATE_ORDER + ["CGM"]
+
+for i, name in enumerate(state_names):      #NEED TO CITE THIS VALUES FROM LITERATURE OR OTHER SOURCES
+    if name.startswith("G_"):
+        Q[i, i] = 1e-4
+    elif name.startswith("I_"):
+        Q[i, i] = 1e-3
+    elif name.startswith("M_") or name == "f2":
+        Q[i, i] = 1e-2
+    elif name == "CGM":
+        Q[i, i] = 1e-3
+    else:
+        Q[i, i] = 1e-4
+#Q is diagonal and positive definite
+
+
+# Solve continuous-time Riccati equation
+P = solve_continuous_are(
+    A_aug.T,
+    C_aug.T,
+    Q,
+    R
+)
+
+# Kalman gain
+L = P @ C_aug.T @ np.linalg.inv(R)
+
+print("Kalman gain shape:", L.shape)
+
+#inspecting which states are corrected strongly
+for i, name in enumerate(state_names):
+    print(f"{name:15s}: L = {L[i,0]:.3e}")
+
+
+
+
+
+
+
+
+
+
+#Running the Kalman filter
+
+def cgm_measurement(x_true):
+    # deterministic measurement (noise added outside)
+    return x_true[7]
+
+
+#state space with added Kalman filter
+def kalman_filter_ode(x_hat, uI, uG, y_meas):
+    innovation = y_meas - (C_aug @ x_hat)[0]
+    dx_hat = (
+        A_aug @ x_hat
+        + B_aug @ np.array([uI, uG])
+        + L.flatten() * innovation
+    )
+    return dx_hat
+
+
+
+def plant_and_kf_odes(t, z):
+    # split true state and estimated state
+    x_true = z[:19]
+    x_hat  = z[19:]
+
+    # controller uses ESTIMATED glucose
+    uI, uG = temporary_controller(x_hat[:19])
+
+    # true nonlinear plant
+    dx_true = sorensen_odes(t, x_true, uI, uG)
+
+    # noisy CGM measurement
+    y_meas = cgm_measurement(x_true)
+
+    # Kalman filter
+    dx_hat = kalman_filter_ode(x_hat, uI, uG, y_meas)
+
+    return np.concatenate([dx_true, dx_hat])
+
+
+z0 = np.zeros(39)
+
+# true plant initial state
+z0[:19] = y0
+
+# estimated state (biased)
+z0[19:19+19] = y0 * 0.9    # 10% error
+z0[-1] = y0[7] * 0.9       # CGM estimate
+
+
+sol_kf = solve_ivp(
+    plant_and_kf_odes,
+    (0.0, t_final),
+    z0,
+    t_eval=t_eval,
+    rtol=1e-6,
+    atol=1e-8
+)
+
+
+
+
+G_true = sol_kf.y[7, :]
+G_est  = sol_kf.y[19 + 7, :]
+
+# add CGM noise *after* simulation
+G_cgm_noisy = G_true + np.random.normal(0.0, sigma_cgm, size=G_true.shape)
+
+
+#plot compares true glucose to estimates glucose from Kalman filter
+plt.figure(figsize=(10,6))
+plt.plot(sol_kf.t, G_true, label="True G_PI")
+plt.plot(sol_kf.t, G_est, '--', label="Estimated G_PI (Kalman)")
+plt.xlabel("Time (min)")
+plt.ylabel("Glucose (mg/dL)")
+plt.legend()
+plt.grid(True)
+plt.title("Kalman Filter Glucose Estimation")
+plt.show()
