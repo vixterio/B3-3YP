@@ -494,6 +494,12 @@ print("D shape:", D.shape)
 
 
 #SENSOR
+#time constant for CGM sensor dynamics
+#it is because CGM does not measure interstitial glucose instantaneously but with some lag.
+#the glucose must diffuse from blood to interstitial space, then diffuse through sensor membranes
+#then it must undergo electrochemical conversion to produce a readable signal
+#it doesn't handle lag between interstitial and blood glucose.
+#SEE ONENOTE FOR HOW IT IS DERIVED USING THE STATE SPACE FORM
 tau_s = 5.0  # minutes    NEED TO CITE THIS FROM LITERATURE
 
 # Augmented A matrix
@@ -670,6 +676,7 @@ z0 = np.zeros(39)
 z0[:19] = y0
 
 # estimated state (biased)
+# this is artificially adding error to initial estimate to see how well the Kalman filter corrects it
 z0[19:19+19] = y0 * 0.9    # 10% error
 z0[-1] = y0[7] * 0.9       # CGM estimate
 
@@ -689,11 +696,11 @@ sol_kf = solve_ivp(
 G_true = sol_kf.y[7, :]
 G_est  = sol_kf.y[19 + 7, :]
 
-# add CGM noise *after* simulation
+# add CGM noise AFTER simulation
 G_cgm_noisy = G_true + np.random.normal(0.0, sigma_cgm, size=G_true.shape)
 
 
-#plot compares true glucose to estimates glucose from Kalman filter
+#plot compares true glucose to estimated glucose from Kalman filter
 plt.figure(figsize=(10,6))
 plt.plot(sol_kf.t, G_true, label="True G_PI")
 plt.plot(sol_kf.t, G_est, '--', label="Estimated G_PI (Kalman)")
