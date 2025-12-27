@@ -1,3 +1,16 @@
+
+
+
+
+
+#THIS MODEL IS WRONG - IGNORE IT BUT KEPT FOR REFERENCE PURPOSES ONLY
+
+
+
+
+
+
+
 import numpy as np
 import matplotlib.pyplot as plt 
 from scipy.integrate import solve_ivp

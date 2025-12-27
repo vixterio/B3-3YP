@@ -162,8 +162,7 @@ initial_conditions = { # Glucose
 }
 
 #printing initial conditions
-#pprint(initial_conditions)
-
+pprint(initial_conditions)
 
 
 
