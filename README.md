@@ -28,7 +28,14 @@ This repository contains our 3YP group's implementation of the *Dual-Hormone MPC
 - Created the **state vector assembly** (IB, IH, IG, IL, IK, IPV, IPI, Γ).  
 - Ensured the output returns a **state derivative vector** suitable for plotting and coupling.  
 
-###
+### **Tommy**
+**Status:** In progress
+- Created **WBS** for the whole project
+- implemented the non-linear **Sorensen model**
+- checked that the output confirms what we expect for a fasting state with no insulin and glucagon exogeneous injections.
+- created a new sorensen model file, implemented the initial conditions for a T1D and checked the output is correct
+- need to add the non-linear ODEs to the file before I linearise it
+- linearise the system using Jacobians
 
 ---
 

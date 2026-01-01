@@ -112,6 +112,7 @@ def insulin_glucagon_odes(
     return np.array([dIB_dt, dIH_dt, dIG_dt, dIL_dt, dIK_dt, dIPV_dt, dIPI_dt, dgamma_dt])
 
 #Source and Sinks-Glucose in mg/min
+GN_PI = 0  
 ## once josh writes glucode ode someone needs to turn these into another function that calculates these rates as instantaneous at each time step -lin
 r_RBCU=10
 r_BGU=70
