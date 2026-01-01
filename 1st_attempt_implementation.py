@@ -1,3 +1,5 @@
+"Attempt to implement linearised model from dual hormone MPC paper"
+
 import numpy as np
 import matplotlib.pyplot as plt
 
