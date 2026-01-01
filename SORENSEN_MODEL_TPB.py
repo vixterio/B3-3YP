@@ -115,7 +115,7 @@ GB_BI = GB_BV - (rB_BGU*Tg_B)/Vg_BI #mg/dL
 GB_PI = GB_PV - (rB_PGU*Tg_P)/Vg_PI #mg/dL
 
 #steady state insulin initial conditions
-IB_PV = 0.5  #uU/L [input insulin concentration]
+IB_PV = 10000     #uU/L [input insulin concentration]
 IB_H = IB_PV/(1-F_PIC) #uU/L
 IB_K = IB_H*(1-F_KIC)
 IB_B = IB_H
@@ -162,8 +162,7 @@ initial_conditions = { # Glucose
 }
 
 #printing initial conditions
-#pprint(initial_conditions)
-
+pprint(initial_conditions)
 
 
 
@@ -270,6 +269,7 @@ def sorensen_odes(t, y):
     M_G_PFR = float(2.93 - 2.10 * np.tanh(4.18 * (GN_H - 0.61)))
     M_I_PFR = float(1.31 - 0.61 * np.tanh(1.06 * (IN_H - 0.47)))
     r_MTC = 9.10 * Gamma  #pg/min
+    #rB_PFR = 0.3 * r_MTC
     r_PFR = rB_PFR * M_I_PFR * M_G_PFR #pg/min 
     dGamma = (r_PFR - r_MTC + uG) / V_gamma #eq 74
 
