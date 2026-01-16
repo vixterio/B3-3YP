@@ -1,23 +1,22 @@
-"""
-MPC_controller_LY.py
+""" MPC_controller_LY.py
 
-Constrained linear MPC for the Sorensen linearised model.
+    Constrained linear MPC for the Sorensen linearised model.
 
-REQUIREMENT:
- - The repository module LINEARISED_MODEL_TPB.py exports continuous-time linearisation:
-     Ac : (n x n) continuous-time A matrix
-     Bc : (n x m) continuous-time B matrix
-     C  : (1 x n) output matrix measuring glucose (row vector or 1D)
-     tau_s : sampling time in MINUTES (scalar)
-   Optionally:
-     x_star : equilibrium state (n,)
-     u_star : equilibrium input (m,)
-
-The script will:
- - Discretise (Ac,Bc) with a ZOH using tau_s (minutes -> seconds conversion).
- - Build and solve a constrained MPC QP (cvxpy, OSQP).
- - Simulate closed-loop on the discrete LTI plant x_{k+1} = A_d x_k + B_d u_k.
- - Plot glucose (C x) and control inputs (insulin, glucagon).
+    REQUIREMENT: 
+    - The repository module LINEARISED_MODEL_TPB.py exports continuous-time linearisation:
+        Ac : (n x n) continuous-time A matrix
+        Bc : (n x m) continuous-time B matrix
+        C : (1 x n) output matrix measuring glucose (row vector or 1D)
+        tau_s : sampling time in MINUTES (scalar)
+        Optionally:
+        x_star : equilibrium state (n,)
+        u_star : equilibrium input (m,)
+        
+    The script will:
+    - Discretise (Ac,Bc) with a ZOH using tau_s (minutes -> seconds conversion).
+    - Build and solve a constrained MPC QP (cvxpy, OSQP).
+    - Simulate closed-loop on the discrete LTI plant x_{k+1} = A_d x_k + B_d u_k.
+    - Plot glucose (C x) and control inputs (insulin, glucagon).
 
 """
 
@@ -27,78 +26,59 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy import signal
 import cvxpy as cp
+from collections import Counter
 
-
-# Load continuous linear model from LINEARISED_MODEL_TPB
 def load_continuous_linear_model():
     modname = "LINEARISED_MODEL_TPB"
     try:
         mod = importlib.import_module(modname)
     except Exception as e:
-        raise RuntimeError(f"Unable to import module '{modname}'. Make sure '{modname}.py' is in the working directory. Import error: {e}")
+        raise RuntimeError(f"Unable to import module '{modname}'. Make sure '{modname}.py' is available. Error: {e}")
 
-    # Required continuous matrices
     A = getattr(mod, "A", None)
     B = getattr(mod, "B", None)
     C = getattr(mod, "C", None)
-    tau_s = getattr(mod, "tau_s", None)  # sampling time in minutes
+    tau_s = getattr(mod, "tau_s", None)
 
-    # fallback if linearised model is not found
     missing = []
     if A is None: missing.append("A")
     if B is None: missing.append("B")
     if C is None: missing.append("C")
-    if tau_s is None: missing.append("tau_s (sampling time in minutes)")
-
+    if tau_s is None: missing.append("tau_s")
     if missing:
-        raise RuntimeError(f"Module '{modname}' is missing required items: {missing}. "
-                           "This script requires continuous-time matrices A, B, C and tau_s. "
-                           "No numerical linearisation will be attempted.")
+        raise RuntimeError(f"Missing in {modname}: {missing}")
 
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
     C = np.asarray(C, dtype=float)
     if C.ndim == 1:
         C = C.reshape((1, -1))
-
     tau_s = float(tau_s)
     x_star = getattr(mod, "x_star", None)
     u_star = getattr(mod, "u_star", None)
 
     return {"A": A, "B": B, "C": C, "tau_s": tau_s, "x_star": x_star, "u_star": u_star, "source": modname}
 
-
-# ZOH discretisation (converts minutes -> seconds)
 def zoh_discretise(A, B, tau_s_min):
-    """
-    Discretise continuous (A,B) with zero-order hold.
-    tau_s_min: sampling time in minutes (convert to seconds for cont2discrete).
-    Returns A_d, B_d
-    """
-    sec = tau_s_min * 60.0
-    # cont2discrete expects (A,B,C,D) and dt in seconds
-    # use D = zeros
-    D = np.zeros((1, A.shape[0]))
+    """Discretise (A,B) with ZOH. tau_s_min in minutes -> convert to seconds."""
+    dt = float(tau_s_min) * 60.0
+    A = np.asarray(A, dtype=float)
+    B = np.asarray(B, dtype=float)
+    C_dummy = np.zeros((1, A.shape[0]))
+    D_dummy = np.zeros((1, B.shape[1]))
     try:
-        A_d, B_d, _, _, _ = signal.cont2discrete((A, B, np.zeros((1, A.shape[0])), 0.0), sec, method="zoh")
-    except Exception as e:
-        # some scipy versions accept a 4-tuple; fallback:
-        try:
-            sys_disc = (A, B, np.zeros((1, A.shape[0])), np.zeros((1,1)))
-            A_d, B_d, _, _, _ = signal.cont2discrete(sys_disc, sec, method="zoh")
-        except Exception as e2:
-            raise RuntimeError(f"ZOH discretisation failed: {e}; fallback failed: {e2}")
-    return np.asarray(A_d), np.asarray(B_d)
+        out = signal.cont2discrete((A, B, C_dummy, D_dummy), dt, method="zoh")
+        A_d, B_d = np.asarray(out[0]), np.asarray(out[1])
+    except Exception:
+        # fallback older signature
+        A_d, B_d, _, _ = signal.cont2discrete((A, B, C_dummy, D_dummy), dt)
+        A_d, B_d = np.asarray(A_d), np.asarray(B_d)
+    return A_d, B_d
 
-# MPC implementation (condensed QP)
 class MPCController:
     def __init__(self, A_d, B_d, C, tau_s=5.0, Np=25, Nc=15,
                  umin=None, umax=None, dumin=None, dumax=None,
-                 lambda_u=None, y_min=40.0, y_max=400.0):
-        """
-        A_d, B_d, C : discrete-time matrices
-        tau_s in minutes (informational)
-        """
+                 lambda_u=None, y_min=-1e6, y_max=1e6):
         self.A = np.asarray(A_d, dtype=float)
         self.B = np.asarray(B_d, dtype=float)
         self.C = np.asarray(C, dtype=float).reshape((1, -1))
@@ -108,17 +88,11 @@ class MPCController:
         self.n = self.A.shape[0]
         self.m = self.B.shape[1]
 
-        # Default bounds
-        if umin is None:
-            umin = np.zeros(self.m)
-        if umax is None:
-            umax = np.array([80.0, 0.5]) if self.m == 2 else np.ones(self.m) * 1e6
-        if dumin is None:
-            dumin = -np.array([16.7, 0.1]) if self.m == 2 else -np.ones(self.m) * 1e6
-        if dumax is None:
-            dumax = np.array([16.7, 0.1]) if self.m == 2 else np.ones(self.m) * 1e6
-        if lambda_u is None:
-            lambda_u = np.eye(self.m) * 1e-2
+        if umin is None: umin = np.zeros(self.m)
+        if umax is None: umax = np.array([80.0, 0.5]) if self.m == 2 else np.ones(self.m)*1e6
+        if dumin is None: dumin = -np.array([16.7, 0.1]) if self.m == 2 else -np.ones(self.m)*1e6
+        if dumax is None: dumax = np.array([16.7, 0.1]) if self.m == 2 else np.ones(self.m)*1e6
+        if lambda_u is None: lambda_u = np.eye(self.m)*1e-2
 
         self.umin = np.asarray(umin).reshape((self.m,))
         self.umax = np.asarray(umax).reshape((self.m,))
@@ -127,53 +101,46 @@ class MPCController:
         self.lambda_u = np.asarray(lambda_u)
         if self.lambda_u.ndim == 1:
             self.lambda_u = np.diag(self.lambda_u)
-        self.y_min = float(y_min)
-        self.y_max = float(y_max)
-
+        self.y_min = float(y_min); self.y_max = float(y_max)
         self._build_prediction_matrices()
 
     def _build_prediction_matrices(self):
-        # Phi: stacking C A^i for i=1..Np
         Phi_rows = []
         A_pow = np.eye(self.n)
-        for i in range(1, self.Np + 1):
+        for i in range(1, self.Np+1):
             A_pow = A_pow @ self.A
             Phi_rows.append(self.C @ A_pow)
-        self.Phi = np.vstack(Phi_rows)  # (Np x n)
+        self.Phi = np.vstack(Phi_rows)
 
-        # H_list: C A^{i-1} B for i=1..Np
         H_list = []
         A_pow = np.eye(self.n)
-        for i in range(1, self.Np + 1):
+        for i in range(1, self.Np+1):
             H_list.append((self.C @ A_pow @ self.B).reshape((1, self.m)))
             A_pow = A_pow @ self.A
 
         Gamma_full = np.zeros((self.Np, self.m * self.Np))
         for row in range(self.Np):
-            for col in range(row + 1):
-                Hi = H_list[row - col]  # 1 x m
+            for col in range(row+1):
+                Hi = H_list[row-col]
                 Gamma_full[row, col*self.m:(col+1)*self.m] = Hi
         self.Gamma_full = Gamma_full
-        self.Gamma = self.Gamma_full[:, :self.m * self.Nc]
+        self.Gamma = self.Gamma_full[:, :self.m*self.Nc]
 
-    def compute_control(self, xk, uk_prev, r=90.0, solver=cp.OSQP, verbose=False):
+    def compute_control(self, xk, uk_prev, r=0, solver=cp.OSQP, verbose=False):
         xk = np.asarray(xk).reshape((self.n,))
         uk_prev = np.asarray(uk_prev).reshape((self.m,))
 
-        # reference vector (Np x 1)
         if np.isscalar(r):
-            r_vec = np.ones((self.Np, 1)) * float(r)
+            r_vec = np.ones((self.Np,1)) * float(r)
         else:
             r = np.asarray(r).reshape(-1)
             if r.size != self.Np:
                 raise ValueError("r must be scalar or length Np")
-            r_vec = r.reshape((self.Np, 1))
+            r_vec = r.reshape((self.Np,1))
 
-        Y0 = (self.Phi @ xk).reshape((self.Np, 1))
+        Y0 = (self.Phi @ xk).reshape((self.Np,1))
+        deltaU = cp.Variable((self.m*self.Nc,1))
 
-        deltaU = cp.Variable((self.m * self.Nc, 1))
-
-        # cumulative T to form u_seq from deltaU
         m = self.m; Nc = self.Nc; Np = self.Np
         T = np.zeros((m*Nc, m*Nc))
         for i in range(Nc):
@@ -183,30 +150,25 @@ class MPCController:
 
         Gamma_T = self.Gamma @ T
         Gamma_u0 = self.Gamma @ uk_prev_repeat
-
         Y_pred = Y0 + Gamma_u0 + Gamma_T @ deltaU
 
         Lambda_block = np.kron(np.eye(Nc), self.lambda_u)
         obj = cp.sum_squares(Y_pred - r_vec) + cp.quad_form(deltaU, Lambda_block)
 
         constraints = []
-        # Δu bounds
         for i in range(Nc):
             du = deltaU[i*m:(i+1)*m, 0]
             constraints += [du >= self.dumin, du <= self.dumax]
-        # u bounds over first Nc steps
         u_seq = uk_prev_repeat + T @ deltaU
         for i in range(Nc):
             ui = u_seq[i*m:(i+1)*m, 0]
             constraints += [ui >= self.umin, ui <= self.umax]
-        # output bounds across Np
         constraints += [Y_pred >= self.y_min, Y_pred <= self.y_max]
 
         prob = cp.Problem(cp.Minimize(obj), constraints)
         prob.solve(solver=solver, verbose=verbose)
 
         if prob.status not in ["optimal", "optimal_inaccurate"]:
-            # fallback: hold previous control
             return uk_prev.copy(), {"status": prob.status}
 
         deltaU_opt = np.array(deltaU.value).reshape(-1)
@@ -215,36 +177,20 @@ class MPCController:
         info = {"deltaU_opt": deltaU_opt, "Y_pred": Y_pred.value.reshape(-1), "qp_status": prob.status}
         return u0, info
 
-
-# Helper: build Bw so that C @ Bw = 1 (unit disturbance -> 1 mg/dL immediate output)
 def build_Bw_unit_output(C, n):
-    """
-    Return Bw (n x 1) such that C @ Bw = 1. If C is degenerate,
-    fall back to placing disturbance in first state.
-    """
-    C = np.asarray(C).reshape((1, -1))
+    C = np.asarray(C).reshape((1,-1))
     denom = float(C @ C.T)
     if np.abs(denom) < 1e-9:
-        Bw = np.zeros((n, 1))
-        Bw[0, 0] = 1.0
+        Bw = np.zeros((n,1)); Bw[0,0] = 1.0
     else:
-        Bw = (C.T / denom).reshape((n, 1))
+        Bw = (C.T / denom).reshape((n,1))
     return Bw
 
-# Closed-loop with disturbance schedule (meals)
-def run_closed_loop_discrete_with_disturbance(A_d, B_d, C, meal_schedule=None, x_star=None, u_star=None, tau_s=5.0, sim_duration_min=2000, tau_absorb_min=60.0, mpc_params=None, disturbance_schedule=None, x0=None, u0=None):
-    """
-    Discrete closed-loop on deviation coordinates with meal absorption compartment.
-
-    - A_d, B_d, C : discrete deviation matrices (A,B are for delta dynamics)
-    - meal_schedule: list of (t_min, carb_equivalent_mgdl) total glucose appearance to be absorbed
-      (we will inject that mass into the absorption compartment at meal time)
-    - x_star, u_star: physical equilibrium (used to compute physical outputs). If None made-up defaults used.
-    - tau_absorb_min: time constant of absorption compartment (minutes)
-    - mpc_params: dict to override Np, Nc, lambda_u, etc.
-    Returns t_vec (minutes), y_phys, x_hist (dev), u_dev_hist, u_phys_hist, g_app_hist
-    """
-    #shapes
+def run_closed_loop_discrete_with_disturbance(A_d, B_d, C,
+                                              meal_schedule=None,
+                                              x_star=None, u_star=None,
+                                              tau_s=5.0, sim_duration_min=2000,
+                                              tau_absorb_min=60.0, mpc_params=None):
     A_d = np.asarray(A_d); B_d = np.asarray(B_d); C = np.asarray(C).reshape((1,-1))
     n = A_d.shape[0]; m = B_d.shape[1]
 
@@ -253,173 +199,141 @@ def run_closed_loop_discrete_with_disturbance(A_d, B_d, C, meal_schedule=None, x
         if np.abs(denom) < 1e-9:
             x_star = np.zeros(n); x_star[0] = 110.0
         else:
-            x_star = (110.0*C.T / denom).reshape((n,))
-    
+            x_star = (110.0 * C.T / denom).reshape((n,))
+
     if u_star is None:
         u_star = np.zeros(m)
 
-    #time grid
     sim_steps = int(np.ceil(sim_duration_min / tau_s))
     t_vec = np.arange(sim_steps) * tau_s
 
-# absorption compartment (continuous approx in discrete time)
-    # g_app is the appearance RATE (mg/dL per minute) entering bloodstream at each discrete step
-    g_abs = 0.0
-    # we track absorption state Ga (mg/dL remaining to absorb) such that g_app_k = Ga_k * (1 - exp(-Ts/tau))
-    Ga = 0.0
-
-    # Precompute discrete absorption factor (first-order)
-    alpha = np.exp(-tau_s / tau_absorb_min)  # Ga_{k+1} = alpha * Ga_k + meal_input_at_k
-    # approximate instantaneous appearance rate from Ga: g_app = (1 - alpha)/tau_s*Ga
-    # more simply treat Bw * g_app (units mg/dL) each step: we'll use g_app = (1-alpha)*Ga
-
-    # Build Bw mapping appearance (mg/dL) to state deviation (so output C @ Bw * g_app adds to y_dev)
-    Bw = build_Bw_unit_output(C, n).flatten()  # shape (n,)
-    # but since absorption produces rate (mg/dL per minute) and our discrete step is tau_s minutes,
-    # convert per-step appearance amount: app_amt = g_app * tau_s (mg/dL per step).
-    # implement as x_dev_{k+1} += Bw * (app_amt) so that physical y increases smoothly.
-
-    # Build meal per-step injection schedule into Ga (total appearance mass distributed exponentially)
     Ga_seq = np.zeros(sim_steps)
-    if meal_schedule is None:
-        meal_schedule = []
-    for (tmin, tot_mgdl) in meal_schedule:
+    if meal_schedule is None: meal_schedule = []
+    for (tmin, tot) in meal_schedule:
         idx = int(np.round(tmin / tau_s))
         if 0 <= idx < sim_steps:
-            # add total mass into Ga at that instant
-            Ga_seq[idx] += float(tot_mgdl)
+            Ga_seq[idx] += float(tot)
 
-    # MPC setup parameters
-    Np = 30; Nc = 15
-    lambda_u = np.eye(m) * 1e-3
+    y_star = float((C @ x_star).reshape(-1)[0])
+    y_min_phys = 40.0; y_max_phys = 400.0
+    y_min_dev = y_min_phys - y_star; y_max_dev = y_max_phys - y_star
+    print(f"y_star={y_star:.4f} mg/dL -> constraining deviations in [{y_min_dev:.4f}, {y_max_dev:.4f}]")
+
+    alpha = np.exp(-tau_s / tau_absorb_min)
+    Bw = build_Bw_unit_output(C, n)  # shape (n,1)
+
+    # Defaults
+    Np = 25; Nc = 15
+    lambda_u = np.diag([1e-4]*m)
+    umin = np.zeros(m)
+    umax = np.array([80.0, 0.5]) if m==2 else np.ones(m)*1e6
+    dumin = -np.array([16.7, 0.1]) if m==2 else -np.ones(m)*1e6
+    dumax = np.array([16.7, 0.1]) if m==2 else np.ones(m)*1e6
+
     if isinstance(mpc_params, dict):
         Np = int(mpc_params.get("Np", Np))
         Nc = int(mpc_params.get("Nc", Nc))
         lambda_u = mpc_params.get("lambda_u", lambda_u)
+        umin = mpc_params.get("umin", umin)
+        umax = mpc_params.get("umax", umax)
+        dumin = mpc_params.get("dumin", dumin)
+        dumax = mpc_params.get("dumax", dumax)
+        if "y_min" in mpc_params and "y_max" in mpc_params:
+            ymn = float(mpc_params["y_min"]); ymx = float(mpc_params["y_max"])
+            y_min_dev = ymn - y_star; y_max_dev = ymx - y_star
+            print(f"Overriding physical y-bounds from mpc_params -> [{ymn}, {ymx}] mg/dL; dev bounds [{y_min_dev}, {y_max_dev}]")
 
     mpc = MPCController(A_d, B_d, C, tau_s=tau_s, Np=Np, Nc=Nc,
-                        umin=None, umax=None, dumin=None, dumax=None,
-                        lambda_u=lambda_u, y_min=40.0, y_max=400.0)
+                        umin=umin, umax=umax, dumin=dumin, dumax=dumax,
+                        lambda_u=lambda_u, y_min=y_min_dev, y_max=y_max_dev)
 
-    # initialize deviation states (we simulate deviation variables)
-    x_dev = np.zeros(n)           # delta x (initially 0: at equilibrium)
-    u_prev_dev = np.zeros(m)      # previous delta-u applied
-    # history arrays
+    x_dev = np.zeros(n)
+    u_prev_dev = np.zeros(m)
     ys_phys = np.zeros(sim_steps)
     xs_dev = np.zeros((sim_steps, n))
     us_dev = np.zeros((sim_steps, m))
     us_phys = np.zeros((sim_steps, m))
     g_app_hist = np.zeros(sim_steps)
+    Ga = 0.0
+    qp_status_list = []
 
     for k in range(sim_steps):
-        # compute physical output
         y_dev = float((C @ x_dev)[0])
-        y_phys = y_dev + float(C @ x_star)
+        y_phys = y_dev + y_star
         ys_phys[k] = y_phys
-        xs_dev[k, :] = x_dev.copy()
+        xs_dev[k,:] = x_dev.copy()
 
-        # compute MPC on deviation state (setpoint in deviation coordinates = 90 - y_star)
-        # desired physical setpoint y_sp = 90 mg/dL -> deviation setpoint r_dev = y_sp - y_star
         r_phys = 90.0
-        r_dev = r_phys - float(C @ x_star)
-        # create reference vector with scalar r_dev
-        u_dev, info = mpc.compute_control(x_dev, u_prev_dev, r=r_dev)
-        us_dev[k, :] = u_dev.copy()
-        us_phys[k, :] = u_dev + u_star  # physical control
+        r_dev = r_phys - y_star
 
-        # absorption dynamics update:
-        # if a meal adds tot mass to Ga at step k: Ga += Ga_seq[k]
-        Ga = alpha * Ga + Ga_seq[k]
-        # appearance per-minute (mg/dL per minute) approximated as (1-alpha)/tau_s * Ga, 
-        # but simpler we compute amount per discrete step:
-        app_amt_per_step = (1.0 - alpha) * Ga  # mg/dL per step (since tau_s inside alpha)
-        # store g_app for plotting as rate per minute: approx = app_amt_per_step / tau_s
+        u_dev, info = mpc.compute_control(x_dev, u_prev_dev, r=r_dev)
+        us_dev[k,:] = u_dev.copy()
+        us_phys[k,:] = u_dev + u_star
+
+        qp_status_list.append(info.get("qp_status","noinfo"))
+
+        Ga = alpha*Ga + Ga_seq[k]
+        app_amt_per_step = (1.0 - alpha) * Ga
         g_app_hist[k] = app_amt_per_step / tau_s
 
-        # apply dynamics (deviation update)
-        # x_dev_{k+1} = A_d x_dev + B_d u_dev + Bw * app_amt_per_step
-        x_dev = A_d @ x_dev + B_d @ u_dev + Bw * app_amt_per_step
+        x_dev = A_d @ x_dev + B_d @ u_dev + (Bw.flatten() * app_amt_per_step)
 
-        # step for next iteration
         u_prev_dev = u_dev.copy()
 
+    print("QP status counts (this sim):", Counter(qp_status_list))
     return t_vec, ys_phys, xs_dev, us_dev, us_phys, g_app_hist
 
-
-# Closed-loop simulation (discrete LTI)
-def run_closed_loop_discrete(A_d, B_d, C, x0=None, u0=None, tau_s=5.0, sim_duration_min=240):
-    A_d = np.asarray(A_d); B_d = np.asarray(B_d); C = np.asarray(C).reshape((1, -1))
-    n = A_d.shape[0]; m = B_d.shape[1]
-    if x0 is None:
-        x = np.zeros(n)
-    else:
-        x = np.asarray(x0).reshape((-1,))
-    if u0 is None:
-        u_prev = np.zeros(m)
-    else:
-        u_prev = np.asarray(u0).reshape((m,))
-
-    sim_steps = int(np.ceil(sim_duration_min / tau_s))
-    t_vec = np.arange(sim_steps) * tau_s
-
-    mpc = MPCController(A_d, B_d, C, tau_s=tau_s, Np=25, Nc=15)
-
-    ys = np.zeros(sim_steps)
-    xs = np.zeros((sim_steps, n))
-    us = np.zeros((sim_steps, m))
-
-    for k in range(sim_steps):
-        ys[k] = float((C @ x)[0])
-        xs[k,:] = x.copy()
-        uk, info = mpc.compute_control(x, u_prev, r=90.0)
-        us[k,:] = uk.copy()
-        # update discrete plant
-        x = A_d @ x + B_d @ uk
-        u_prev = uk
-
-    return t_vec, ys, xs, us
-
-
-# Main
 def main():
     try:
         model = load_continuous_linear_model()
     except RuntimeError as e:
-        print("ERROR:", e)
-        sys.exit(1)
+        print("ERROR:", e); sys.exit(1)
 
     A = model["A"]; B = model["B"]; C = model["C"]; tau_s = model["tau_s"]
     x_star = model.get("x_star", None)
-    u_star = model.get("u_star", None)
-    source = model.get("source", "LINEARISED_MODEL_TPB")
+    u_star_model = model.get("u_star", None)
+    source = model.get("source","LINEARISED_MODEL_TPB")
 
     print(f"Loaded continuous linear model from '{source}'. A shape {A.shape}, B shape {B.shape}, C shape {C.shape}, tau_s={tau_s} min")
-    # Discretise now (ZOH)
     A_d, B_d = zoh_discretise(A, B, tau_s)
     print(f"Discretised with ZOH -> A_d shape {A_d.shape}, B_d shape {B_d.shape}")
 
-    # Choosing meals, equilibrium and MPC tuning
+    # Choose x_star: use provided if present, else pick one with y_star=90
     if x_star is None:
-        denom = float(C @ C.T)
+        denom = float((C @ C.T).reshape(()))
         if np.abs(denom) < 1e-9:
-            x_star = np.zeros(A_d.shape[0]); x_star[0] = 110.0
+            x_star = np.zeros(A_d.shape[0]); x_star[0] = 90.0
         else:
-            x_star = (110.0 * C.T / denom).reshape((-1,))
-        print("Made-up x_star so physical baseline ~110 mg/dL.")
-    if u_star is None:
-        u_star = np.zeros(B_d.shape[1])
-        print("Made-up u_star = zeros.")
+            x_star = (90.0 * C.T / denom).reshape((-1,))
+        print("No x_star in model -> creating x_star with y_star=90.0")
+    else:
+        print("Using x_star from model (if provided).")
 
-    # Simulate closed-loop on discrete LTI
-    stim_minutes = 2000
-    meal_schedule = [
-        (60.0, 50.0),    # breakfast at 60 min -> +50 mg/dL bump
-        (360.0, 70.0),   # lunch at 360 min -> +70 mg/dL bump
-        (720.0, 55.0),   # dinner at 720 min -> +60 mg/dL bump
-    ]    
-    
-    # MPC tuning: more aggressive (smaller lambda) and longer horizon
-    mpc_params = {"Np": 40, "Nc": 20, "lambda_u": np.eye(B_d.shape[1]) * 1e-3}
+    # IMPORTANT: force u_star = zeros to avoid steady offset 
+    u_star = np.zeros(B_d.shape[1])
+    print("Forcing u_star = zeros -> no steady insulin/glucagon at equilibrium.")
+
+    # Meal schedule (paper-like)
+    sim_minutes = 2000
+    meal_schedule = [(60.0, 50.0), (360.0, 70.0), (720.0, 55.0)]
+
+    # MPC tuning: paper horizons. Keep lambda moderate; adjust if needed.
+    # Default symmetric lambda (can be tuned). We keep insulin and glucagon similar penalty here.
+    lambda_u = np.diag([1e-4]*B_d.shape[1])
+    mpc_params = {
+        "Np": 25,
+        "Nc": 15,
+        "lambda_u": lambda_u,
+        "umin": np.zeros(B_d.shape[1]),
+        "umax": np.array([80.0, 0.5]) if B_d.shape[1]==2 else np.ones(B_d.shape[1])*1e6,
+        "dumin": -np.array([16.7, 0.1]) if B_d.shape[1]==2 else -np.ones(B_d.shape[1])*1e6,
+        "dumax": np.array([16.7, 0.1]) if B_d.shape[1]==2 else np.ones(B_d.shape[1])*1e6,
+        "y_min": 60.0,
+        "y_max": 110.0
+    }
+
+    print("C @ B_d (how each input affects output):", np.round((C @ B_d).reshape(-1),6))
+    print("Using lambda_u diag:", np.diag(lambda_u))
 
     print("Simulating closed-loop on discrete LTI model.")
     t_vec, y_phys, x_dev_hist, u_dev_hist, u_phys_hist, g_app_hist = run_closed_loop_discrete_with_disturbance(
@@ -428,40 +342,41 @@ def main():
         x_star=x_star,
         u_star=u_star,
         tau_s=tau_s,
-        sim_duration_min=stim_minutes,
+        sim_duration_min=sim_minutes,
         tau_absorb_min=90.0,
         mpc_params=mpc_params)
 
+    # Diagnostics
+    print("\n--- control diagnostics ---")
+    print("u_star (if present) summary:", np.round(u_star,5))
+    print("u_dev mean/std:", np.round(np.mean(u_dev_hist, axis=0),6), np.round(np.std(u_dev_hist, axis=0),6))
+    print("u_phys mean/std:", np.round(np.mean(u_phys_hist, axis=0),6), np.round(np.std(u_phys_hist, axis=0),6))
+    print("first 20 u_phys rows:\n", np.round(u_phys_hist[:20,:],6))
+    print("--- end diagnostics ---\n")
 
+    print("C @ x_star (y_star) = ", float((C @ x_star).reshape(-1)[0]))
+    r_dev = 90.0 - float((C @ x_star).reshape(-1)[0])
+    print("deviation setpoint r_dev (90 - y_star) =", r_dev)
 
-    # Plot results
-    fig, axs = plt.subplots(4, 1, figsize=(12, 9), sharex=True,
-                            gridspec_kw={"height_ratios":[2, 1, 1, 0.6]})
-
+    # Plot
+    fig, axs = plt.subplots(4,1,figsize=(12,9),sharex=True, gridspec_kw={"height_ratios":[2,1,1,0.6]})
     axs[0].plot(t_vec, y_phys, label="Glucose (C x)")
     axs[0].axhline(90.0, ls="--", color="k", label="setpoint 90 mg/dL")
-    axs[0].set_ylabel("Glucose (mg/dL)")
-    axs[0].set_ylim([60, 110])
-    axs[0].legend(loc="upper right"); axs[0].grid(True)
+    axs[0].set_ylabel("Glucose (mg/dL)"); axs[0].set_ylim([60,100]); axs[0].legend(loc="upper right"); axs[0].grid(True)
 
     axs[1].step(t_vec, u_phys_hist[:,0], where='post', label="Insulin infusion (mU/min)")
-    axs[1].set_ylabel("Insulin (mU/min)")
-    axs[1].grid(True); axs[1].legend()
+    axs[1].set_ylabel("Insulin (mU/min)"); axs[1].set_ylim([0,25]); axs[1].grid(True); axs[1].legend()
 
     if u_phys_hist.shape[1] > 1:
         axs[2].step(t_vec, u_phys_hist[:,1], where='post', label="Glucagon infusion (mg/min)")
+        axs[2].set_ylim([-0.05,0.5])
     else:
         axs[2].plot(t_vec, np.zeros_like(t_vec), label="Glucagon (unused)")
-    axs[2].set_ylabel("Glucagon (mg/min)")
-    axs[2].grid(True); axs[2].legend()
+    axs[2].set_ylabel("Glucagon (mg/min)"); axs[2].grid(True); axs[2].legend()
 
-    # show meal appearance rate (mg/dL per minute)
     axs[3].plot(t_vec, g_app_hist, drawstyle='steps-post', label="meal appearance (mg/dL/min)")
-    axs[3].set_ylabel("Meal\n(mg/dL/min)")
-    axs[3].set_xlabel("Time (minutes)")
-    axs[3].grid(True)
+    axs[3].set_ylabel("Meal\n(mg/dL/min)"); axs[3].set_xlabel("Time (minutes)"); axs[3].grid(True)
 
-    # annotate meal boundaries
     for tmin, mag in meal_schedule:
         axs[0].axvline(tmin, color='red', linestyle=':', alpha=0.6)
         axs[0].text(tmin+2, axs[0].get_ylim()[1]-5, f"meal {int(mag)}", color="red", rotation=90, va="top")
@@ -471,4 +386,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
