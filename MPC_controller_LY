@@ -216,6 +216,76 @@ class MPCController:
         return u0, info
 
 
+# Helper: build Bw so that C @ Bw = 1 (unit disturbance -> 1 mg/dL immediate output)
+def build_Bw_unit_output(C, n):
+    """
+    Return Bw (n x 1) such that C @ Bw = 1. If C is degenerate,
+    fall back to placing disturbance in first state.
+    """
+    C = np.asarray(C).reshape((1, -1))
+    denom = float(C @ C.T)
+    if np.abs(denom) < 1e-9:
+        Bw = np.zeros((n, 1))
+        Bw[0, 0] = 1.0
+    else:
+        Bw = (C.T / denom).reshape((n, 1))
+    return Bw
+
+# Closed-loop with disturbance schedule (meals)
+def run_closed_loop_discrete_with_disturbance(A_d, B_d, C, disturbance_schedule=None, x0=None, u0=None, tau_s=5.0, sim_duration_min=240):
+    """
+    Simulate discrete plant x_{k+1}=A_d x + B_d u + Bw * d_k with Bw built so C@Bw=1.
+    disturbance_schedule: list of (time_minute, magnitude_mg_dl) impulses.
+    Returns (t_vec, y, x_hist, u_hist, d_seq)
+    """
+    A_d = np.asarray(A_d); B_d = np.asarray(B_d); C = np.asarray(C).reshape((1,-1))
+    n = A_d.shape[0]; m = B_d.shape[1]
+
+    if x0 is None:
+        x = np.zeros(n)
+    else:
+        x = np.asarray(x0).reshape((-1,))
+    if u0 is None:
+        u_prev = np.zeros(m)
+    else:
+        u_prev = np.asarray(u0).reshape((m,))
+
+    sim_steps = int(np.ceil(sim_duration_min / tau_s))
+    t_vec = np.arange(sim_steps) * tau_s
+
+    # Build disturbance input Bw so that C @ Bw = 1 (1 mg/dL per unit d_k)
+    Bw = build_Bw_unit_output(C, n)  # (n x 1)
+
+    # Build disturbance sequence
+    d_seq = np.zeros(sim_steps)
+    if disturbance_schedule is not None:
+        for (t_min, mag) in disturbance_schedule:
+            idx = int(np.round(t_min / tau_s))
+            if 0 <= idx < sim_steps:
+                d_seq[idx] += float(mag)
+
+    # MPC
+    mpc = MPCController(A_d, B_d, C, tau_s=tau_s, Np=25, Nc=15)
+
+    ys = np.zeros(sim_steps)
+    xs = np.zeros((sim_steps, n))
+    us = np.zeros((sim_steps, m))
+
+    for k in range(sim_steps):
+        ys[k] = float((C @ x)[0])
+        xs[k,:] = x.copy()
+
+        uk, info = mpc.compute_control(x, u_prev, r=90.0)
+        us[k,:] = uk.copy()
+
+        dk = d_seq[k]
+        x = A_d @ x + B_d @ uk + (Bw.flatten() * dk)
+
+        u_prev = uk
+
+    return t_vec, ys, xs, us, d_seq
+
+
 # Closed-loop simulation (discrete LTI)
 def run_closed_loop_discrete(A_d, B_d, C, x0=None, u0=None, tau_s=5.0, sim_duration_min=240):
     A_d = np.asarray(A_d); B_d = np.asarray(B_d); C = np.asarray(C).reshape((1, -1))
@@ -277,29 +347,49 @@ def main():
 
     # Simulate closed-loop on discrete LTI
     stim_minutes = 2000
+    disturbance_schedule = [
+        (60.0, 50.0),    # breakfast at 60 min -> +50 mg/dL bump
+        (360.0, 70.0),   # lunch at 360 min -> +70 mg/dL bump
+    ]
     print("Simulating closed-loop on discrete LTI model.")
-    t_vec, ys, xs, us = run_closed_loop_discrete(A_d, B_d, C, x0=x_star, u0=u_star, tau_s=tau_s, sim_duration_min=stim_minutes)
+    t_vec, ys, xs, us, d_seq = run_closed_loop_discrete_with_disturbance(A_d, B_d, C, disturbance_schedule=disturbance_schedule, x0=x_star, u0=u_star, tau_s=tau_s, sim_duration_min=stim_minutes)
+
+
 
     # Plot results
-    fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
+    fig, axs = plt.subplots(4, 1, figsize=(10, 9), sharex=True, gridspec_kw={"height_ratios":[2, 1, 1, 0.6]})
+
+    # Glucose
     axs[0].plot(t_vec, ys, label="Glucose (C x)")
     axs[0].axhline(90.0, ls="--", color="k", label="setpoint 90 mg/dL")
     axs[0].set_ylabel("Glucose (mg/dL)")
+    axs[0].set_ylim([60, 180])
     axs[0].legend(); axs[0].grid(True)
 
     axs[1].step(t_vec, us[:,0], where="post", label="Insulin (mU/min)")
     axs[1].set_ylabel("Insulin (mU/min)")
     axs[1].legend(); axs[1].grid(True)
 
+    # Glucagon
     if us.shape[1] > 1:
-        axs[2].step(t_vec, us[:,1], where="post", label="Glucagon (mg/min)")
-        axs[2].set_ylabel("Glucagon (mg/min)")
-        axs[2].legend(); axs[2].grid(True)
+        axs[2].step(t_vec, us[:,1], where='post', label="Glucagon infusion (mg/min)")
     else:
-        axs[2].plot(t_vec, np.zeros_like(t_vec))
-        axs[2].set_ylabel("u2 (unused)")
+        axs[2].plot(t_vec, np.zeros_like(t_vec), label="Glucagon (unused)")
+    axs[2].set_ylabel("Glucagon (mg/min)")
+    axs[2].legend(); axs[2].grid(True)
 
-    axs[2].set_xlabel("Time (minutes)")
+    # Disturbance pulses (meals)
+    axs[3].stem(t_vec, d_seq, basefmt=" ")
+    axs[3].set_ylabel("Meal impulse\n(mg/dL)")
+    axs[3].set_xlabel("Time (minutes)")
+    axs[3].grid(True)
+
+    # annotate meal times
+    for (t_min, mag) in disturbance_schedule:
+        axs[0].axvline(t_min, color="red", ls=":", alpha=0.6)
+        axs[0].text(t_min+2, axs[0].get_ylim()[1]-5, f"meal {mag:.0f}", color="red", rotation=90, va="top")
+
+
     plt.tight_layout()
     plt.show()
 
