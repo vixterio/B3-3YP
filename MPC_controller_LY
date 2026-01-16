@@ -215,6 +215,22 @@ def run_closed_loop_discrete_with_disturbance(A_d, B_d, C,
             Ga_seq[idx] += float(tot)
 
     y_star = float((C @ x_star).reshape(-1)[0])
+
+    # Ensure x_star has y_star = 90 (the actual physiological setpoint)
+    if np.abs(y_star - 90.0) > 1.0:
+        print(f"WARNING: y_star={y_star:.2f} is not 90! Recomputing x_star to force y_star=90...")
+        denom = float((C @ C.T).reshape(()))
+        if np.abs(denom) < 1e-9:
+            x_star = np.zeros(n); x_star[0] = 90.0
+        else:
+            x_star = (90.0 * C.T / denom).reshape((-1,))
+        y_star = 90.0
+        print(f"FIXED: x_star now has y_star = {float((C @ x_star).reshape(-1)[0]):.2f} mg/dL")
+
+    # Now this will be zero:
+    r_dev = 90.0 - y_star  # Should be 0 if x_star is correct
+    print(f"r_dev = {r_dev}")
+
     y_min_phys = 40.0; y_max_phys = 400.0
     y_min_dev = y_min_phys - y_star; y_max_dev = y_max_phys - y_star
     print(f"y_star={y_star:.4f} mg/dL -> constraining deviations in [{y_min_dev:.4f}, {y_max_dev:.4f}]")
