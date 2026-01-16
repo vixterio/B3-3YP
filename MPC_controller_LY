@@ -232,58 +232,118 @@ def build_Bw_unit_output(C, n):
     return Bw
 
 # Closed-loop with disturbance schedule (meals)
-def run_closed_loop_discrete_with_disturbance(A_d, B_d, C, disturbance_schedule=None, x0=None, u0=None, tau_s=5.0, sim_duration_min=240):
+def run_closed_loop_discrete_with_disturbance(A_d, B_d, C, meal_schedule=None, x_star=None, u_star=None, tau_s=5.0, sim_duration_min=2000, tau_absorb_min=60.0, mpc_params=None, disturbance_schedule=None, x0=None, u0=None):
     """
-    Simulate discrete plant x_{k+1}=A_d x + B_d u + Bw * d_k with Bw built so C@Bw=1.
-    disturbance_schedule: list of (time_minute, magnitude_mg_dl) impulses.
-    Returns (t_vec, y, x_hist, u_hist, d_seq)
+    Discrete closed-loop on deviation coordinates with meal absorption compartment.
+
+    - A_d, B_d, C : discrete deviation matrices (A,B are for delta dynamics)
+    - meal_schedule: list of (t_min, carb_equivalent_mgdl) total glucose appearance to be absorbed
+      (we will inject that mass into the absorption compartment at meal time)
+    - x_star, u_star: physical equilibrium (used to compute physical outputs). If None made-up defaults used.
+    - tau_absorb_min: time constant of absorption compartment (minutes)
+    - mpc_params: dict to override Np, Nc, lambda_u, etc.
+    Returns t_vec (minutes), y_phys, x_hist (dev), u_dev_hist, u_phys_hist, g_app_hist
     """
+    #shapes
     A_d = np.asarray(A_d); B_d = np.asarray(B_d); C = np.asarray(C).reshape((1,-1))
     n = A_d.shape[0]; m = B_d.shape[1]
 
-    if x0 is None:
-        x = np.zeros(n)
-    else:
-        x = np.asarray(x0).reshape((-1,))
-    if u0 is None:
-        u_prev = np.zeros(m)
-    else:
-        u_prev = np.asarray(u0).reshape((m,))
+    if x_star is None:
+        denom = float(C @ C.T)
+        if np.abs(denom) < 1e-9:
+            x_star = np.zeros(n); x_star[0] = 110.0
+        else:
+            x_star = (110.0*C.T / denom).reshape((n,))
+    
+    if u_star is None:
+        u_star = np.zeros(m)
 
+    #time grid
     sim_steps = int(np.ceil(sim_duration_min / tau_s))
     t_vec = np.arange(sim_steps) * tau_s
 
-    # Build disturbance input Bw so that C @ Bw = 1 (1 mg/dL per unit d_k)
-    Bw = build_Bw_unit_output(C, n)  # (n x 1)
+# absorption compartment (continuous approx in discrete time)
+    # g_app is the appearance RATE (mg/dL per minute) entering bloodstream at each discrete step
+    g_abs = 0.0
+    # we track absorption state Ga (mg/dL remaining to absorb) such that g_app_k = Ga_k * (1 - exp(-Ts/tau))
+    Ga = 0.0
 
-    # Build disturbance sequence
-    d_seq = np.zeros(sim_steps)
-    if disturbance_schedule is not None:
-        for (t_min, mag) in disturbance_schedule:
-            idx = int(np.round(t_min / tau_s))
-            if 0 <= idx < sim_steps:
-                d_seq[idx] += float(mag)
+    # Precompute discrete absorption factor (first-order)
+    alpha = np.exp(-tau_s / tau_absorb_min)  # Ga_{k+1} = alpha * Ga_k + meal_input_at_k
+    # approximate instantaneous appearance rate from Ga: g_app = (1 - alpha)/tau_s*Ga
+    # more simply treat Bw * g_app (units mg/dL) each step: we'll use g_app = (1-alpha)*Ga
 
-    # MPC
-    mpc = MPCController(A_d, B_d, C, tau_s=tau_s, Np=25, Nc=15)
+    # Build Bw mapping appearance (mg/dL) to state deviation (so output C @ Bw * g_app adds to y_dev)
+    Bw = build_Bw_unit_output(C, n).flatten()  # shape (n,)
+    # but since absorption produces rate (mg/dL per minute) and our discrete step is tau_s minutes,
+    # convert per-step appearance amount: app_amt = g_app * tau_s (mg/dL per step).
+    # implement as x_dev_{k+1} += Bw * (app_amt) so that physical y increases smoothly.
 
-    ys = np.zeros(sim_steps)
-    xs = np.zeros((sim_steps, n))
-    us = np.zeros((sim_steps, m))
+    # Build meal per-step injection schedule into Ga (total appearance mass distributed exponentially)
+    Ga_seq = np.zeros(sim_steps)
+    if meal_schedule is None:
+        meal_schedule = []
+    for (tmin, tot_mgdl) in meal_schedule:
+        idx = int(np.round(tmin / tau_s))
+        if 0 <= idx < sim_steps:
+            # add total mass into Ga at that instant
+            Ga_seq[idx] += float(tot_mgdl)
+
+    # MPC setup parameters
+    Np = 30; Nc = 15
+    lambda_u = np.eye(m) * 1e-3
+    if isinstance(mpc_params, dict):
+        Np = int(mpc_params.get("Np", Np))
+        Nc = int(mpc_params.get("Nc", Nc))
+        lambda_u = mpc_params.get("lambda_u", lambda_u)
+
+    mpc = MPCController(A_d, B_d, C, tau_s=tau_s, Np=Np, Nc=Nc,
+                        umin=None, umax=None, dumin=None, dumax=None,
+                        lambda_u=lambda_u, y_min=40.0, y_max=400.0)
+
+    # initialize deviation states (we simulate deviation variables)
+    x_dev = np.zeros(n)           # delta x (initially 0: at equilibrium)
+    u_prev_dev = np.zeros(m)      # previous delta-u applied
+    # history arrays
+    ys_phys = np.zeros(sim_steps)
+    xs_dev = np.zeros((sim_steps, n))
+    us_dev = np.zeros((sim_steps, m))
+    us_phys = np.zeros((sim_steps, m))
+    g_app_hist = np.zeros(sim_steps)
 
     for k in range(sim_steps):
-        ys[k] = float((C @ x)[0])
-        xs[k,:] = x.copy()
+        # compute physical output
+        y_dev = float((C @ x_dev)[0])
+        y_phys = y_dev + float(C @ x_star)
+        ys_phys[k] = y_phys
+        xs_dev[k, :] = x_dev.copy()
 
-        uk, info = mpc.compute_control(x, u_prev, r=90.0)
-        us[k,:] = uk.copy()
+        # compute MPC on deviation state (setpoint in deviation coordinates = 90 - y_star)
+        # desired physical setpoint y_sp = 90 mg/dL -> deviation setpoint r_dev = y_sp - y_star
+        r_phys = 90.0
+        r_dev = r_phys - float(C @ x_star)
+        # create reference vector with scalar r_dev
+        u_dev, info = mpc.compute_control(x_dev, u_prev_dev, r=r_dev)
+        us_dev[k, :] = u_dev.copy()
+        us_phys[k, :] = u_dev + u_star  # physical control
 
-        dk = d_seq[k]
-        x = A_d @ x + B_d @ uk + (Bw.flatten() * dk)
+        # absorption dynamics update:
+        # if a meal adds tot mass to Ga at step k: Ga += Ga_seq[k]
+        Ga = alpha * Ga + Ga_seq[k]
+        # appearance per-minute (mg/dL per minute) approximated as (1-alpha)/tau_s * Ga, 
+        # but simpler we compute amount per discrete step:
+        app_amt_per_step = (1.0 - alpha) * Ga  # mg/dL per step (since tau_s inside alpha)
+        # store g_app for plotting as rate per minute: approx = app_amt_per_step / tau_s
+        g_app_hist[k] = app_amt_per_step / tau_s
 
-        u_prev = uk
+        # apply dynamics (deviation update)
+        # x_dev_{k+1} = A_d x_dev + B_d u_dev + Bw * app_amt_per_step
+        x_dev = A_d @ x_dev + B_d @ u_dev + Bw * app_amt_per_step
 
-    return t_vec, ys, xs, us, d_seq
+        # step for next iteration
+        u_prev_dev = u_dev.copy()
+
+    return t_vec, ys_phys, xs_dev, us_dev, us_phys, g_app_hist
 
 
 # Closed-loop simulation (discrete LTI)
@@ -338,57 +398,73 @@ def main():
     A_d, B_d = zoh_discretise(A, B, tau_s)
     print(f"Discretised with ZOH -> A_d shape {A_d.shape}, B_d shape {B_d.shape}")
 
+    # Choosing meals, equilibrium and MPC tuning
     if x_star is None:
-        x_star = np.zeros(A_d.shape[0])
-        print("Warning: x_star not provided; using zeros.")
+        denom = float(C @ C.T)
+        if np.abs(denom) < 1e-9:
+            x_star = np.zeros(A_d.shape[0]); x_star[0] = 110.0
+        else:
+            x_star = (110.0 * C.T / denom).reshape((-1,))
+        print("Made-up x_star so physical baseline ~110 mg/dL.")
     if u_star is None:
         u_star = np.zeros(B_d.shape[1])
-        print("Warning: u_star not provided; using zeros.")
+        print("Made-up u_star = zeros.")
 
     # Simulate closed-loop on discrete LTI
     stim_minutes = 2000
-    disturbance_schedule = [
+    meal_schedule = [
         (60.0, 50.0),    # breakfast at 60 min -> +50 mg/dL bump
         (360.0, 70.0),   # lunch at 360 min -> +70 mg/dL bump
-    ]
+        (720.0, 55.0),   # dinner at 720 min -> +60 mg/dL bump
+    ]    
+    
+    # MPC tuning: more aggressive (smaller lambda) and longer horizon
+    mpc_params = {"Np": 40, "Nc": 20, "lambda_u": np.eye(B_d.shape[1]) * 1e-3}
+
     print("Simulating closed-loop on discrete LTI model.")
-    t_vec, ys, xs, us, d_seq = run_closed_loop_discrete_with_disturbance(A_d, B_d, C, disturbance_schedule=disturbance_schedule, x0=x_star, u0=u_star, tau_s=tau_s, sim_duration_min=stim_minutes)
+    t_vec, y_phys, x_dev_hist, u_dev_hist, u_phys_hist, g_app_hist = run_closed_loop_discrete_with_disturbance(
+        A_d, B_d, C,
+        meal_schedule=meal_schedule,
+        x_star=x_star,
+        u_star=u_star,
+        tau_s=tau_s,
+        sim_duration_min=stim_minutes,
+        tau_absorb_min=90.0,
+        mpc_params=mpc_params)
 
 
 
     # Plot results
-    fig, axs = plt.subplots(4, 1, figsize=(10, 9), sharex=True, gridspec_kw={"height_ratios":[2, 1, 1, 0.6]})
+    fig, axs = plt.subplots(4, 1, figsize=(12, 9), sharex=True,
+                            gridspec_kw={"height_ratios":[2, 1, 1, 0.6]})
 
-    # Glucose
-    axs[0].plot(t_vec, ys, label="Glucose (C x)")
+    axs[0].plot(t_vec, y_phys, label="Glucose (C x)")
     axs[0].axhline(90.0, ls="--", color="k", label="setpoint 90 mg/dL")
     axs[0].set_ylabel("Glucose (mg/dL)")
-    axs[0].set_ylim([60, 180])
-    axs[0].legend(); axs[0].grid(True)
+    axs[0].set_ylim([60, 110])
+    axs[0].legend(loc="upper right"); axs[0].grid(True)
 
-    axs[1].step(t_vec, us[:,0], where="post", label="Insulin (mU/min)")
+    axs[1].step(t_vec, u_phys_hist[:,0], where='post', label="Insulin infusion (mU/min)")
     axs[1].set_ylabel("Insulin (mU/min)")
-    axs[1].legend(); axs[1].grid(True)
+    axs[1].grid(True); axs[1].legend()
 
-    # Glucagon
-    if us.shape[1] > 1:
-        axs[2].step(t_vec, us[:,1], where='post', label="Glucagon infusion (mg/min)")
+    if u_phys_hist.shape[1] > 1:
+        axs[2].step(t_vec, u_phys_hist[:,1], where='post', label="Glucagon infusion (mg/min)")
     else:
         axs[2].plot(t_vec, np.zeros_like(t_vec), label="Glucagon (unused)")
     axs[2].set_ylabel("Glucagon (mg/min)")
-    axs[2].legend(); axs[2].grid(True)
+    axs[2].grid(True); axs[2].legend()
 
-    # Disturbance pulses (meals)
-    axs[3].stem(t_vec, d_seq, basefmt=" ")
-    axs[3].set_ylabel("Meal impulse\n(mg/dL)")
+    # show meal appearance rate (mg/dL per minute)
+    axs[3].plot(t_vec, g_app_hist, drawstyle='steps-post', label="meal appearance (mg/dL/min)")
+    axs[3].set_ylabel("Meal\n(mg/dL/min)")
     axs[3].set_xlabel("Time (minutes)")
     axs[3].grid(True)
 
-    # annotate meal times
-    for (t_min, mag) in disturbance_schedule:
-        axs[0].axvline(t_min, color="red", ls=":", alpha=0.6)
-        axs[0].text(t_min+2, axs[0].get_ylim()[1]-5, f"meal {mag:.0f}", color="red", rotation=90, va="top")
-
+    # annotate meal boundaries
+    for tmin, mag in meal_schedule:
+        axs[0].axvline(tmin, color='red', linestyle=':', alpha=0.6)
+        axs[0].text(tmin+2, axs[0].get_ylim()[1]-5, f"meal {int(mag)}", color="red", rotation=90, va="top")
 
     plt.tight_layout()
     plt.show()
