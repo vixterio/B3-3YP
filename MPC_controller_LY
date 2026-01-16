@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 MPC_controller_LY.py
 
@@ -11,8 +10,8 @@ REQUIREMENT:
      C  : (1 x n) output matrix measuring glucose (row vector or 1D)
      tau_s : sampling time in MINUTES (scalar)
    Optionally:
-     x_eq : equilibrium state (n,)
-     u_eq : equilibrium input (m,)
+     x_star : equilibrium state (n,)
+     u_star : equilibrium input (m,)
 
 The script will:
  - Discretise (Ac,Bc) with a ZOH using tau_s (minutes -> seconds conversion).
@@ -63,10 +62,10 @@ def load_continuous_linear_model():
         C = C.reshape((1, -1))
 
     tau_s = float(tau_s)
-    x_eq = getattr(mod, "x_eq", None)
-    u_eq = getattr(mod, "u_eq", None)
+    x_star = getattr(mod, "x_star", None)
+    u_star = getattr(mod, "u_star", None)
 
-    return {"A": A, "B": B, "C": C, "tau_s": tau_s, "x_eq": x_eq, "u_eq": u_eq, "source": modname}
+    return {"A": A, "B": B, "C": C, "tau_s": tau_s, "x_star": x_star, "u_star": u_star, "source": modname}
 
 
 # ZOH discretisation (converts minutes -> seconds)
@@ -216,9 +215,8 @@ class MPCController:
         info = {"deltaU_opt": deltaU_opt, "Y_pred": Y_pred.value.reshape(-1), "qp_status": prob.status}
         return u0, info
 
-# ----------------------------
-# Closed-loop simulation (discrete LTI only)
-# ----------------------------
+
+# Closed-loop simulation (discrete LTI)
 def run_closed_loop_discrete(A_d, B_d, C, x0=None, u0=None, tau_s=5.0, sim_duration_min=240):
     A_d = np.asarray(A_d); B_d = np.asarray(B_d); C = np.asarray(C).reshape((1, -1))
     n = A_d.shape[0]; m = B_d.shape[1]
@@ -251,9 +249,8 @@ def run_closed_loop_discrete(A_d, B_d, C, x0=None, u0=None, tau_s=5.0, sim_durat
 
     return t_vec, ys, xs, us
 
-# ----------------------------
+
 # Main
-# ----------------------------
 def main():
     try:
         model = load_continuous_linear_model()
@@ -262,8 +259,8 @@ def main():
         sys.exit(1)
 
     A = model["A"]; B = model["B"]; C = model["C"]; tau_s = model["tau_s"]
-    x_eq = model.get("x_eq", None)
-    u_eq = model.get("u_eq", None)
+    x_star = model.get("x_star", None)
+    u_star = model.get("u_star", None)
     source = model.get("source", "LINEARISED_MODEL_TPB")
 
     print(f"Loaded continuous linear model from '{source}'. A shape {A.shape}, B shape {B.shape}, C shape {C.shape}, tau_s={tau_s} min")
@@ -271,16 +268,17 @@ def main():
     A_d, B_d = zoh_discretise(A, B, tau_s)
     print(f"Discretised with ZOH -> A_d shape {A_d.shape}, B_d shape {B_d.shape}")
 
-    if x_eq is None:
-        x_eq = np.zeros(A_d.shape[0])
-        print("Warning: x_eq not provided; using zeros.")
-    if u_eq is None:
-        u_eq = np.zeros(B_d.shape[1])
-        print("Warning: u_eq not provided; using zeros.")
+    if x_star is None:
+        x_star = np.zeros(A_d.shape[0])
+        print("Warning: x_star not provided; using zeros.")
+    if u_star is None:
+        u_star = np.zeros(B_d.shape[1])
+        print("Warning: u_star not provided; using zeros.")
 
     # Simulate closed-loop on discrete LTI
-    print("Simulating closed-loop on discrete LTI model (no nonlinear plant).")
-    t_vec, ys, xs, us = run_closed_loop_discrete(A_d, B_d, C, x0=x_eq, u0=u_eq, tau_s=tau_s, sim_duration_min=240)
+    stim_minutes = 2000
+    print("Simulating closed-loop on discrete LTI model.")
+    t_vec, ys, xs, us = run_closed_loop_discrete(A_d, B_d, C, x0=x_star, u0=u_star, tau_s=tau_s, sim_duration_min=stim_minutes)
 
     # Plot results
     fig, axs = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
