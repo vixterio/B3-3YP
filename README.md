@@ -32,11 +32,11 @@ This repository contains our 3YP group's implementation of the *Dual-Hormone MPC
 **Status:** In progress
 - Created **WBS** for the whole project
 - implemented the non-linear **Sorensen model**
-- checked that the output confirms what we expect for a fasting state with no insulin and glucagon exogeneous injections.
-- created a new sorensen model file, implemented the initial conditions for a T1D and checked the output is correct
-- need to add the non-linear ODEs to the file before I linearise it
-- linearise the system using Jacobians
-
+- implemented the non-linear Sorensen model
+- found a closed loop equilibrium point that we can linearise the model around
+- linearised the model to come up with a system described by (A,B,C,D)
+- have begun modelling the CGM sensor by creating augmented matrices
+- implemented a Kalman filter
 ---
 
 ## How to Run the ODE Subsystem and Plots
