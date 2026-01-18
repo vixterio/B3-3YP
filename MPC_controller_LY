@@ -8,7 +8,6 @@
         B : (n x m) continuous-time B matrix
         C : (1 x n) output matrix measuring glucose (row vector or 1D)
         tau_s : sampling time in MINUTES (scalar)
-        Optionally:
         x_star : equilibrium state (n,)
         u_star : equilibrium input (m,)
         
@@ -18,31 +17,23 @@
     - Simulate closed-loop on the discrete LTI plant x_{k+1} = A_d x_k + B_d u_k.
     - Plot glucose (C x) and control inputs (insulin, glucagon).
 
-"""
+    Specs enforced:
+    - Output: peripheral glucose y(k) = C x(k) (assumed by provided C)
+    - Manipulated vars: insulin (u1) and glucagon (u2)
+    - Disturbance: random unannounced meal
+    - Setpoint: 90 mg/dL
+    - Sampling time: 5 min (we discretise using 5 min)
+    - Prediction horizon Np = 25
+    - Control horizon Nc = 15
+    - Output constraints: 80 <= y <= 120 mg/dL
+    - Insulin constraints: 0 <= u1 <= 80 (mU/min)
+    - Glucagon constraints: 0 <= u2 <= 0.5 (mg/min)
+    - Rate limits: |Δu1| <= 16.7, |Δu2| <= 0.1 per sample
 
-"""
-MPC_controller_LY.py
-
-Linear MPC with constraints for the Sorensen linearised model, following the paper's specs
-and the flowchart logic:
-
-Specs enforced:
-- Output: peripheral glucose y(k) = C x(k) (assumed by provided C)
-- Manipulated vars: insulin (u1) and glucagon (u2)
-- Disturbance: random unannounced meal
-- Setpoint: 90 mg/dL
-- Sampling time: 5 min (we discretise using 5 min)
-- Prediction horizon Np = 25
-- Control horizon Nc = 15
-- Output constraints: 80 <= y <= 120 mg/dL
-- Insulin constraints: 0 <= u1 <= 80 (mU/min)
-- Glucagon constraints: 0 <= u2 <= 0.5 (mg/min)
-- Rate limits: |Δu1| <= 16.7, |Δu2| <= 0.1 per sample
-
-Flowchart logic (supervisory switching):
-- If BG > 120: "Bolus insulin" mode -> insulin-only MPC (glucagon forced to 0), aggressive tuning
-- If 80 <= BG <= 120: "Basal insulin" mode -> insulin-only MPC (glucagon forced to 0), insulin capped to a basal max
-- If BG < 80: "Glucagon infusion" mode -> glucagon-only MPC (insulin forced to 0)
+    Flowchart logic (supervisory switching):
+    - If BG > 120: "Bolus insulin" mode -> insulin-only MPC (glucagon forced to 0), aggressive tuning
+    - If 80 <= BG <= 120: "Basal insulin" mode -> insulin-only MPC (glucagon forced to 0), insulin capped to a basal max
+    - If BG < 80: "Glucagon infusion" mode -> glucagon-only MPC (insulin forced to 0)
 """
 
 import sys
