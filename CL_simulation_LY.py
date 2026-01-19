@@ -57,52 +57,33 @@ from SORENSEN_MODEL_TPB import (
 )
 
 # Helper: simulate nonlinear Sorensen for one MPC step
-def sorensen_step(x, u, dt, meal=0.0):
+def sorensen_step(x, u, dt, meal=0.0, n_substeps=20):
 
-    # Apply meal disturbance to glucose compartment (G_PI index = 7)
     x0 = x.copy()
+
+    # Apply meal to G_PI (state index 7)
     x0[7] += meal
 
     uI, uG = u
-    
-    # Inject MPC control into state
-    x0[8] += uI * dt # I_PV index = 8
-    x0[18] += uG * dt # Gamma index = 18
+
+    # Inject MPC control as rates into state
+    x0[8]  += uI * dt   # I_PV index
+    x0[18] += uG * dt  # Gamma index
+
+    t_eval = np.linspace(0.0, dt, n_substeps)
 
     sol = solve_ivp(
         sorensen_odes,
         (0.0, dt),
         x0,
+        t_eval=t_eval,
         method="RK45",
         rtol=1e-6,
         atol=1e-8
     )
 
-    return sol.y[:, -1]
-
-    """
-    Advance nonlinear Sorensen model by dt minutes.
-    Meal enters as glucose disturbance (mg/min).
-    """
-
-    def rhs(t, y):
-        uI, uG = u
-        # Meal added to glucose appearance (G_PI)
-        y = y.copy()
-        y[7] += meal
-        return sorensen_odes(t, y, uI, uG)
-
-    sol = solve_ivp(
-        rhs,
-        (0, dt),
-        x,
-        method="RK45",
-        rtol=1e-6,
-        atol=1e-8
-    )
-
-    return sol.y[:, -1]
-
+    # Return final state AND glucose trajectory
+    return sol.y[:, -1], sol.y[7, :]
 
 # Closed-loop simulation
 def run_closed_loop(sim_duration_min=2000):
@@ -125,11 +106,12 @@ def run_closed_loop(sim_duration_min=2000):
     u_prev_dev = np.zeros(2)
 
     sim_steps = int(sim_duration_min / TAU_S_MIN)
-    t = np.arange(sim_steps) * TAU_S_MIN
+    t_glucose = []
+    glucose = []    
 
-    glucose = np.zeros(sim_steps)
-    insulin = np.zeros(sim_steps)
-    glucagon = np.zeros(sim_steps)
+    t_mpc = []
+    insulin = []
+    glucagon_inf = []
 
     # Random unannounced meal
     rng = np.random.default_rng(7)
@@ -138,16 +120,24 @@ def run_closed_loop(sim_duration_min=2000):
 
         # Meal disturbance
         meal = 0.0
-        if rng.random() < 0.02:
-            meal = rng.uniform(20, 60)  # mg/min
+        if rng.random() < 0.0005:
+            meal = rng.uniform(30, 50)  # mg/min
+        else:
+            meal = 0.0
 
         # Measurement
         G_PI = x_true[7]
-        glucose[k] = G_PI
+        
+        t_mpc.append(k * TAU_S_MIN)
+        t_glucose.append(k * TAU_S_MIN) 
+        glucose.append(G_PI)
 
         # --- MPC state correction (paper assumption) ---
         y_dev_meas = G_PI - R_SETPOINT
-        x_dev = (C.T / (C @ C.T))[:, 0] * y_dev_meas
+
+        y_model = (C @ x_dev)[0]
+        e = (G_PI - R_SETPOINT) - y_model
+        x_dev = x_dev + 0.05 * C.T.flatten() * e
 
 
         # Supervisory switching
@@ -173,41 +163,55 @@ def run_closed_loop(sim_duration_min=2000):
         )
 
         u = u_dev + u_star
-        insulin[k], glucagon[k] = u
+        insulin.append(u[0])
+        glucagon_inf.append(u[1])
 
         # Nonlinear plant update
-        x_true = sorensen_step(x_true, u, TAU_S_MIN, meal=meal)
+        x_true, G_trace = sorensen_step(x_true, u, TAU_S_MIN, meal=meal, n_substeps=20)
+
+        dt_sub = TAU_S_MIN / (len(G_trace)-1)
+        # Append internal glucose trajectory for smooth plot
+        for i, g in enumerate(G_trace[1:]):
+            t_glucose.append(k * TAU_S_MIN + (i+1) * (TAU_S_MIN / len(G_trace)))
+            glucose.append(g)
 
         # Linear model update (for MPC)
         x_dev = A_d @ x_dev + B_d @ u_dev
         u_prev_dev = u_dev.copy()
 
-    return t, glucose, insulin, glucagon
+    return np.array(t_glucose), np.array(glucose), np.array(t_mpc),np.array(insulin), np.array(glucagon_inf)
 
 
 
 if __name__ == "__main__":
 
-    t, G, I, Gg = run_closed_loop()
+    t_g, G, t_mpc, I, Gg = run_closed_loop()
 
     plt.figure(figsize=(12, 9))
 
+    # ---- Glucose (continuous) ----
     plt.subplot(3, 1, 1)
-    plt.plot(t, G)
-    plt.axhline(90, linestyle="--", color="k")
+    plt.plot(t_g, G, label="Glucose (G_PI)")
+    plt.axhline(90, linestyle="--", color="k", label="Setpoint 90")
     plt.ylabel("Glucose (mg/dL)")
     plt.grid(True)
+    plt.legend()
 
+    # ---- Insulin (MPC, ZOH) ----
     plt.subplot(3, 1, 2)
-    plt.step(t, I, where="post")
+    plt.step(t_mpc, I, where="post", label="Insulin infusion")
     plt.ylabel("Insulin (mU/min)")
     plt.grid(True)
+    plt.legend()
 
+    # ---- Glucagon (MPC, ZOH) ----
     plt.subplot(3, 1, 3)
-    plt.step(t, Gg, where="post")
+    plt.step(t_mpc, Gg, where="post", label="Glucagon infusion")
     plt.ylabel("Glucagon (mg/min)")
     plt.xlabel("Time (min)")
     plt.grid(True)
+    plt.legend()
 
     plt.tight_layout()
     plt.show()
+
