@@ -59,21 +59,18 @@ from SORENSEN_MODEL_TPB import (
 # Helper: simulate nonlinear Sorensen for one MPC step
 def sorensen_step(x, u, dt, meal=0.0, n_substeps=20):
 
+    uI, uG_mg = u
+    uG = uG_mg * 1e6  # convert mg/min → pg/min
+
     x0 = x.copy()
 
     # Apply meal to G_PI (state index 7)
     x0[7] += meal
 
-    uI, uG = u
-
-    # Inject MPC control as rates into state
-    x0[8]  += uI * dt   # I_PV index
-    x0[18] += uG * dt  # Gamma index
-
     t_eval = np.linspace(0.0, dt, n_substeps)
 
     sol = solve_ivp(
-        sorensen_odes,
+        lambda t, y: sorensen_odes(t, y, uI, uG),
         (0.0, dt),
         x0,
         t_eval=t_eval,
@@ -120,8 +117,8 @@ def run_closed_loop(sim_duration_min=2000):
 
         # Meal disturbance
         meal = 0.0
-        if rng.random() < 0.0005:
-            meal = rng.uniform(30, 50)  # mg/min
+        if rng.random() < 0.003:
+            meal = rng.uniform(20, 40)  # mg/min
         else:
             meal = 0.0
 
@@ -163,8 +160,8 @@ def run_closed_loop(sim_duration_min=2000):
         )
 
         u = u_dev + u_star
-        insulin.append(u[0])
-        glucagon_inf.append(u[1])
+        insulin.append(u_dev[0])
+        glucagon_inf.append(u_dev[1])
 
         # Nonlinear plant update
         x_true, G_trace = sorensen_step(x_true, u, TAU_S_MIN, meal=meal, n_substeps=20)

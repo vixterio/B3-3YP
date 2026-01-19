@@ -167,13 +167,13 @@ pprint(initial_conditions)
 
 
 
-#exogenous insulin
-def u_insulin(t):
-    return 0  #µU/min
+# #exogenous insulin
+# def u_insulin(t):
+#     return 0  #µU/min
 
-#exogenous glucagon
-def u_glucagon(t):
-    return 0  #pg/min
+# #exogenous glucagon
+# def u_glucagon(t):
+#     return 0  #pg/min
 
 
 
@@ -183,11 +183,11 @@ def u_glucagon(t):
 
 #compute metabolic fluxes -> compute glucose derivatives -> compute insulin derivatives -> compute regulator and glucagon derivatives
 
-def sorensen_odes(t, y):
+def sorensen_odes(t, y, uI, uG):
     #y is 19 state vector, u_insulin and u_glucagon are exogenous insulin and glucagon infusions respectively
     #calling exogenous functions
-    uI = u_insulin(t)
-    uG = u_glucagon(t)
+    #uI = u_insulin(t)
+    #uG = u_glucagon(t)
     #unpack state vector
     (G_PV, G_H, G_K, G_BV, G_G, G_L, G_BI, G_PI, I_PV, I_H, I_K, I_B, I_G, I_PI, I_L, M_I_HGP, M_I_HGU, f2, Gamma) = y
 
@@ -312,46 +312,46 @@ t_eval = np.linspace(0.0,t_final, 2001) #every 0.5 minutes
 
 
 
-#SOLVING THE ODEs
-y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
-sol = solve_ivp(
-    sorensen_odes,
-    (0.0, t_final),
-    y0,
-    method="RK45",
-    t_eval=t_eval,
-    rtol=1e-6,
-    atol=1e-8
-)
+# #SOLVING THE ODEs
+# y0 = np.array([initial_conditions[name] for name in STATE_ORDER], dtype=float)
+# sol = solve_ivp(
+#     sorensen_odes,
+#     (0.0, t_final),
+#     y0,
+#     method="RK45",
+#     t_eval=t_eval,
+#     rtol=1e-6,
+#     atol=1e-8
+# )
 
-#PLOTS
-#G_PI 
-plt.figure(figsize=(10,6))
-plt.plot(sol.t, sol.y[7], label="G_PI (periph interstitial glucose) -- index 7")
-plt.xlabel("Time (min)")
-plt.ylabel("Glucose (mg/dL)")
-plt.title("Glucose compartments")
-plt.legend()
-plt.grid(True)
+# #PLOTS
+# #G_PI 
+# plt.figure(figsize=(10,6))
+# plt.plot(sol.t, sol.y[7], label="G_PI (periph interstitial glucose) -- index 7")
+# plt.xlabel("Time (min)")
+# plt.ylabel("Glucose (mg/dL)")
+# plt.title("Glucose compartments")
+# plt.legend()
+# plt.grid(True)
 
-#Glucagon
-plt.figure(figsize=(10,4))
-plt.plot(sol.t, sol.y[18], label="Gamma (glucagon) -- index 18")
-plt.xlabel("Time (min)")
-plt.ylabel("Glucagon (pg/mL)")
-plt.title("Glucagon")
-plt.legend()
-plt.grid(True)
+# #Glucagon
+# plt.figure(figsize=(10,4))
+# plt.plot(sol.t, sol.y[18], label="Gamma (glucagon) -- index 18")
+# plt.xlabel("Time (min)")
+# plt.ylabel("Glucagon (pg/mL)")
+# plt.title("Glucagon")
+# plt.legend()
+# plt.grid(True)
 
-#Insulin
-plt.figure(figsize=(10,4))
-plt.plot(sol.t, sol.y[8], label="I_PV -- index 8")
-plt.xlabel("Time (min)")
-plt.ylabel("Insulin (μU/L)")
-plt.title("Insulin")
-plt.legend()
-plt.grid(True)
-plt.show()
+# #Insulin
+# plt.figure(figsize=(10,4))
+# plt.plot(sol.t, sol.y[8], label="I_PV -- index 8")
+# plt.xlabel("Time (min)")
+# plt.ylabel("Insulin (μU/L)")
+# plt.title("Insulin")
+# plt.legend()
+# plt.grid(True)
+# plt.show()
 
 
 
