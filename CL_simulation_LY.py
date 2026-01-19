@@ -30,6 +30,14 @@ import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 import SORENSEN_MODEL_TPB as sorensen
 
+# Physical scaling factors
+INSULIN_SCALE = 1e5     # maps MPC deviation -> mU/min
+GLUCAGON_SCALE = 0.5    # maps MPC deviation -> mg/min
+# Basal hormone levels
+BASAL_GLUCAGON = 0.34   # mg/min
+INSULIN_ON_THRESHOLD = 1e-3  # mU/min (numerical zero)
+
+
 def zero_controller(y):
     return 0.0, 0.0
 
@@ -117,10 +125,12 @@ def run_closed_loop(sim_duration_min=2000):
 
         # Meal disturbance
         meal = 0.0
-        if rng.random() < 0.003:
-            meal = rng.uniform(20, 40)  # mg/min
-        else:
-            meal = 0.0
+        current_time = k * TAU_S_MIN
+        if current_time >= 250:
+            if rng.random() < 0.002:
+                meal = rng.uniform(30, 50)  # mg/min
+            else:
+                meal = 0.0
 
         # Measurement
         G_PI = x_true[7]
@@ -159,9 +169,22 @@ def run_closed_loop(sim_duration_min=2000):
             lambda_u=lambda_mode
         )
 
-        u = u_dev + u_star
-        insulin.append(u_dev[0])
-        glucagon_inf.append(u_dev[1])
+        # Insulin: MPC-controlled, scaled to physical units
+        uI = INSULIN_SCALE * u_dev[0]   # mU/min
+
+        # Glucagon: basal unless insulin is active
+        if uI > INSULIN_ON_THRESHOLD:
+            uG = 0.0
+        else:
+            uG = BASAL_GLUCAGON          # mg/min
+
+        # Combined control input (NO deviation glucagon)
+        u = np.array([uI, uG]) + u_star
+
+        # Store absolute values for plotting
+        insulin.append(uI)
+        glucagon_inf.append(uG)
+
 
         # Nonlinear plant update
         x_true, G_trace = sorensen_step(x_true, u, TAU_S_MIN, meal=meal, n_substeps=20)
