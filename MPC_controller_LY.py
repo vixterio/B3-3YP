@@ -41,9 +41,7 @@ from scipy import signal
 import cvxpy as cp
 
 
-# =========================
 # Paper constants / specs
-# =========================
 TAU_S_MIN = 5.0           # sampling time (min)
 R_SETPOINT = 90.0         # mg/dL
 NP = 25                   # prediction horizon
@@ -63,32 +61,27 @@ DU2_MAX = 0.1
 THRESH_HIGH = 120.0
 THRESH_LOW = 80.0
 
-# Basal insulin cap (not explicitly numeric in your snippet, but flowchart requires basal mode)
-# Choose a small cap so it behaves like basal infusion while in 80-120 zone.
-BASAL_U1_MAX = 5.0  # mU/min (tune if needed; keeps "basal" small)
+# Basal insulin cap
+BASAL_U1_MAX = 10.0  # mU/min (tune if needed)
 
 # Soft-constraint penalty for output bounds (prevents infeasible QP -> zero control)
 SOFT_Y_PENALTY = 1e6
 
-# Random unannounced meal disturbance: random step increments in mg/dL
-MEAL_PROB_PER_STEP = 0.01  # probability per 5-min step
-MEAL_STEP_RANGE = (10.0, 40.0)  # mg/dL step size if a meal occurs
-
-RNG_SEED = 7  # make runs reproducible; set None for truly random
 
 
 def load_continuous_linear_model():
     modname = "LINEARISED_MODEL_TPB"
-    try:
+    try: # fallback if not found
         mod = importlib.import_module(modname)
     except Exception as e:
-        raise RuntimeError(f"Unable to import module '{modname}'. Make sure '{modname}.py' is available. Error: {e}")
+        raise RuntimeError(f"Unable to import module '{modname}'. Make sure '{modname}.py' is available. Error: {e}") 
 
     A = getattr(mod, "A", None)
     B = getattr(mod, "B", None)
     C = getattr(mod, "C", None)
     tau_s = getattr(mod, "tau_s", None)
 
+    # fallback if continuous model not found
     missing = []
     if A is None: missing.append("A")
     if B is None: missing.append("B")
@@ -97,6 +90,7 @@ def load_continuous_linear_model():
     if missing:
         raise RuntimeError(f"Missing in {modname}: {missing}")
 
+    # ensuring matrices are arrays, data types are as expected
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
     C = np.asarray(C, dtype=float)
@@ -114,7 +108,7 @@ def zoh_discretise(A, B, tau_s_min):
     dt = float(tau_s_min) * 60.0
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
-    C_dummy = np.zeros((1, A.shape[0]))
+    C_dummy = np.zeros((1, A.shape[0])) # ZOH needs C,D but we only want A,B. Discretisation of A,B is independent of C,D.
     D_dummy = np.zeros((1, B.shape[1]))
     out = signal.cont2discrete((A, B, C_dummy, D_dummy), dt, method="zoh")
     A_d, B_d = np.asarray(out[0]), np.asarray(out[1])
@@ -129,6 +123,7 @@ class MPCController:
     Note: We enforce the flowchart by passing a "mode" that constrains which actuator(s)
     are allowed (insulin-only / glucagon-only) and by using basal cap in the basal zone.
     """
+    # store in structure,
     def __init__(self, A_d, B_d, C, tau_s_min,
                  Np=NP, Nc=NC,
                  lambda_u=None):
@@ -136,15 +131,16 @@ class MPCController:
         self.B = np.asarray(B_d, dtype=float)
         self.C = np.asarray(C, dtype=float).reshape((1, -1))
         self.tau_s = float(tau_s_min)
-        self.Np = int(Np)
-        self.Nc = int(min(Nc, Np))
-        self.n = self.A.shape[0]
-        self.m = self.B.shape[1]
+        self.Np = int(Np)           # normalise
+        self.Nc = int(min(Nc, Np))  # enforce controller design constraint Nc <= Np
+        self.n = self.A.shape[0]            # no of states
+        self.m = self.B.shape[1]            # no of inputs
         if self.m != 2:
             raise ValueError("This controller expects m=2 (insulin, glucagon).")
-
+        
+        # damping factor in cost function
         if lambda_u is None:
-            # Default: mild penalty (we will adjust per-mode externally)
+            # arbitrary default
             lambda_u = np.diag([1e-4, 1e-4])
         self.lambda_u = np.asarray(lambda_u, dtype=float)
         if self.lambda_u.ndim == 1:
@@ -153,40 +149,47 @@ class MPCController:
         self._build_prediction_matrices()
 
     def _build_prediction_matrices(self):
-        # Phi maps xk -> stacked future outputs (free response)
+        # Phi maps xk -> stacked future outputs (free response, zero future input)
         Phi_rows = []
         A_pow = np.eye(self.n)
         for _ in range(1, self.Np + 1):
             A_pow = A_pow @ self.A
             Phi_rows.append(self.C @ A_pow)
-        self.Phi = np.vstack(Phi_rows)  # (Np x n)
+        self.Phi = np.vstack(Phi_rows)  # (Np x n), gives observability matrix ie CA, CA^2, ...
 
         # Build convolution matrix Gamma for piecewise-constant u over horizon
         H_list = []
         A_pow = np.eye(self.n)
         for _ in range(1, self.Np + 1):
             H_list.append((self.C @ A_pow @ self.B).reshape((1, self.m)))
-            A_pow = A_pow @ self.A
+            A_pow = A_pow @ self.A          # gives CB, CAB, CA^2B, ...
 
         Gamma_full = np.zeros((self.Np, self.m * self.Np))
+
         for row in range(self.Np):
             for col in range(row + 1):
                 Hi = H_list[row - col]
-                Gamma_full[row, col*self.m:(col+1)*self.m] = Hi
+                Gamma_full[row, col*self.m:(col+1)*self.m] = Hi     # creates discrete-time convolution of inputs with the system, Markov parameter
         self.Gamma_full = Gamma_full
-        self.Gamma = self.Gamma_full[:, :self.m * self.Nc]
+        self.Gamma = self.Gamma_full[:, :self.m * self.Nc] # applys control horizon
 
     def compute_control(self, xk, uk_prev, r_dev,
                         y_min_dev, y_max_dev,
                         mode: str,
                         lambda_u=None,
                         solver=cp.OSQP, verbose=False):
-        """
-        mode in {"BOLUS", "BASAL", "GLUCAGON"}
-        """
-        xk = np.asarray(xk).reshape((self.n,))
-        uk_prev = np.asarray(uk_prev).reshape((self.m,))
+        
+        # Shortcuts
+        m = self.m
+        n = self.n
+        Nc = self.Nc
+        Np = self.Np
 
+        # Dimension checking inputs
+        xk = np.asarray(xk).reshape((n,))
+        uk_prev = np.asarray(uk_prev).reshape((m,))
+
+        # Passing lambda_u
         if lambda_u is None:
             lambda_u = self.lambda_u
         else:
@@ -195,13 +198,11 @@ class MPCController:
                 lambda_u = np.diag(lambda_u)
 
         # Reference vector (deviation)
-        r_vec = np.ones((self.Np, 1)) * float(r_dev)
+        r_vec = np.ones((Np, 1)) * float(r_dev)
 
-        Y0 = (self.Phi @ xk).reshape((self.Np, 1))
-        deltaU = cp.Variable((self.m * self.Nc, 1))
+        Y0 = (self.Phi @ xk).reshape((Np, 1)) # free response (no future input)
+        deltaU = cp.Variable((m * Nc, 1)) # decision variable: stacked input increments 
 
-        m = self.m
-        Nc = self.Nc
 
         # Cumulative sum operator to convert deltaU -> u sequence
         T = np.zeros((m * Nc, m * Nc))
@@ -217,7 +218,8 @@ class MPCController:
         Y_pred = Y0 + Gamma_u0 + Gamma_T @ deltaU
 
         # Soft output constraint slack
-        s = cp.Variable((self.Np, 1), nonneg=True)
+        # Allow violation of output constraints via slack variables (no infeasibility)
+        s = cp.Variable((Np, 1), nonneg=True)
 
         # Objective
         Lambda_block = np.kron(np.eye(Nc), lambda_u)
@@ -229,7 +231,7 @@ class MPCController:
 
         constraints = []
 
-        # Rate bounds (Δu)
+        # Rate bounds (Δu) for actuator limits
         dumin = np.array([-DU1_MAX, -DU2_MAX], dtype=float)
         dumax = np.array([ DU1_MAX,  DU2_MAX], dtype=float)
         for i in range(Nc):
@@ -277,8 +279,12 @@ class MPCController:
             return uk_prev.copy(), {"qp_status": prob.status}
 
         deltaU_opt = np.array(deltaU.value).reshape(-1)
+
+
         du0 = deltaU_opt[:m]
-        u0 = uk_prev + du0
-        info = {"qp_status": prob.status}
+        u0 = uk_prev + du0 # receding horizon: apply first input only
+
+        info = {"qp_status": prob.status} 
+
         return u0, info
 

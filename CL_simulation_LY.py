@@ -10,17 +10,13 @@ This script uses the state-space formulation:
     y_k     = C x_k + e_k
 
 where:
-- x is the linearised Sorensen state
+- x is the nonlinear Sorensen state
 - u = [u1, u2] are insulin and glucagon infusion rates
 - y is the peripheral glucose measurement (G_PI)
 - e_k represents unmeasured disturbances (e.g. meals)
     - this is not modelled explicitly, propagated or fed into the MPC
-
-• The MPC uses a LINEARISED Sorensen model (A,B,C)
-• The PLANT is the NONLINEAR Sorensen model
-• Meals/disturbances act ONLY on the nonlinear plant
-• Disturbances are unmeasured and NOT included in MPC predictions
-• Feedback occurs via peripheral glucose measurement (G_PI)
+- The MPC uses a linearised model (A,B,C) around the nominal point
+- Feedback occurs via G_PI measurement only
 
 """
 
@@ -30,12 +26,10 @@ import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
 import SORENSEN_MODEL_TPB as sorensen
 
-# Physical scaling factors
-INSULIN_SCALE = 1e5     # maps MPC deviation -> mU/min
-GLUCAGON_SCALE = 0.5    # maps MPC deviation -> mg/min
+
 # Basal hormone levels
 BASAL_GLUCAGON = 0.34   # mg/min
-INSULIN_ON_THRESHOLD = 1e-3  # mU/min (numerical zero)
+BASAL_INSULIN = 0.0
 
 
 def zero_controller(y):
@@ -139,7 +133,7 @@ def run_closed_loop(sim_duration_min=2000):
         t_glucose.append(k * TAU_S_MIN) 
         glucose.append(G_PI)
 
-        # --- MPC state correction (paper assumption) ---
+        # MPC state correction (paper assumption)
         y_dev_meas = G_PI - R_SETPOINT
 
         y_model = (C @ x_dev)[0]
@@ -147,16 +141,17 @@ def run_closed_loop(sim_duration_min=2000):
         x_dev = x_dev + 0.05 * C.T.flatten() * e
 
 
-        # Supervisory switching
+        # Supervisory switching MPC
+        # enforcing flowchart logic with damping factor
         if G_PI > THRESH_HIGH:
             mode = "BOLUS"
-            lambda_mode = np.diag([1e-5, 1e-4])
+            lambda_mode = np.diag([1e-5, 1e-3])
         elif G_PI < THRESH_LOW:
             mode = "GLUCAGON"
-            lambda_mode = np.diag([1e-4, 1e-5])
+            lambda_mode = np.diag([1e-3, 1e-5])
         else:
             mode = "BASAL"
-            lambda_mode = np.diag([1e-3, 1e-3])
+            lambda_mode = np.diag([1e-3, 1e3])
 
         # MPC
         u_dev, _ = mpc.compute_control(
@@ -170,16 +165,16 @@ def run_closed_loop(sim_duration_min=2000):
         )
 
         # Insulin: MPC-controlled, scaled to physical units
-        uI = INSULIN_SCALE * u_dev[0]   # mU/min
+        uI = u_dev[0]   # mU/min
 
         # Glucagon: basal unless insulin is active
-        if uI > INSULIN_ON_THRESHOLD:
+        if uI > BASAL_INSULIN:
             uG = 0.0
         else:
             uG = BASAL_GLUCAGON          # mg/min
 
         # Combined control input (NO deviation glucagon)
-        u = np.array([uI, uG]) + u_star
+        u = np.array([uI, uG]) #+ u_star
 
         # Store absolute values for plotting
         insulin.append(uI)
