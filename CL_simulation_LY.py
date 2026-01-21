@@ -31,10 +31,9 @@ import SORENSEN_MODEL_TPB as sorensen
 BASAL_GLUCAGON = 0.34   # mg/min
 BASAL_INSULIN = 0.0
 
-
+# Disable Sorensen internal controller
 def zero_controller(y):
     return 0.0, 0.0
-
 sorensen.temporary_controller = zero_controller
 
 from MPC_controller_LY import (
@@ -51,28 +50,38 @@ from MPC_controller_LY import (
     THRESH_LOW
 )
 
-# Nonlinear Sorensen plant
+# Import nonlinear Sorensen plant for states
 from SORENSEN_MODEL_TPB import (
     sorensen_odes,
     initial_conditions,
     STATE_ORDER
 )
 
-# Helper: simulate nonlinear Sorensen for one MPC step
-def sorensen_step(x, u, dt, meal=0.0, n_substeps=20):
+# Simulate nonlinear Sorensen for one MPC step
+def sorensen_step(x, u, dt, meal=0.0, n_substeps=50):
 
     uI, uG_mg = u
-    uG = uG_mg * 1e6  # convert mg/min → pg/min
+    uG = uG_mg * 1e9  # convert mg/min → pg/min
 
     x0 = x.copy()
 
-    # Apply meal to G_PI (state index 7)
-    x0[7] += meal
+    # Apply meal disturbance
+    # Meal interpreted as total mg over dt
+    meal_rate = meal / dt  # mg/min
+
+    def wrapped_odes(t, y):
+        dydt = sorensen_odes(t, y, uI, uG)
+
+        # Inject meal into plasma glucose derivative
+        # dG_PV += meal_rate / Vg_PV
+        dydt[0] += meal_rate / sorensen.Vg_PV
+
+        return dydt
 
     t_eval = np.linspace(0.0, dt, n_substeps)
 
     sol = solve_ivp(
-        lambda t, y: sorensen_odes(t, y, uI, uG),
+        wrapped_odes,
         (0.0, dt),
         x0,
         t_eval=t_eval,
@@ -122,7 +131,7 @@ def run_closed_loop(sim_duration_min=2000):
         current_time = k * TAU_S_MIN
         if current_time >= 250:
             if rng.random() < 0.002:
-                meal = rng.uniform(30, 50)  # mg/min
+                meal = rng.uniform(30, 50)  # mg
             else:
                 meal = 0.0
 
@@ -142,16 +151,12 @@ def run_closed_loop(sim_duration_min=2000):
 
 
         # Supervisory switching MPC
-        # enforcing flowchart logic with damping factor
         if G_PI > THRESH_HIGH:
             mode = "BOLUS"
-            lambda_mode = np.diag([1e-5, 1e-3])
         elif G_PI < THRESH_LOW:
             mode = "GLUCAGON"
-            lambda_mode = np.diag([1e-3, 1e-5])
         else:
             mode = "BASAL"
-            lambda_mode = np.diag([1e-3, 1e3])
 
         # MPC
         u_dev, _ = mpc.compute_control(
@@ -161,24 +166,21 @@ def run_closed_loop(sim_duration_min=2000):
             y_min_dev=Y_MIN - R_SETPOINT,
             y_max_dev=Y_MAX - R_SETPOINT,
             mode=mode,
-            lambda_u=lambda_mode
+            lambda_u=None
         )
 
-        # Insulin: MPC-controlled, scaled to physical units
-        uI = u_dev[0]   # mU/min
+        if mode in ["BOLUS", "BASAL"]:
+            u_star_mode = np.array([u_star[0], 0.0])  # no glucagon baseline
+        elif mode == "GLUCAGON":
+            u_star_mode = np.array([0.0, u_star[1]])  # no insulin baseline
 
-        # Glucagon: basal unless insulin is active
-        if uI > BASAL_INSULIN:
-            uG = 0.0
-        else:
-            uG = BASAL_GLUCAGON          # mg/min
 
-        # Combined control input (NO deviation glucagon)
-        u = np.array([uI, uG]) #+ u_star
+        u = u_dev + u_star_mode
+        uI = u[0]   # mU/min
 
         # Store absolute values for plotting
-        insulin.append(uI)
-        glucagon_inf.append(uG)
+        insulin.append(u[0])
+        glucagon_inf.append(u[1])
 
 
         # Nonlinear plant update
@@ -204,7 +206,7 @@ if __name__ == "__main__":
 
     plt.figure(figsize=(12, 9))
 
-    # ---- Glucose (continuous) ----
+    # Glucose (continuous)
     plt.subplot(3, 1, 1)
     plt.plot(t_g, G, label="Glucose (G_PI)")
     plt.axhline(90, linestyle="--", color="k", label="Setpoint 90")
@@ -212,14 +214,14 @@ if __name__ == "__main__":
     plt.grid(True)
     plt.legend()
 
-    # ---- Insulin (MPC, ZOH) ----
+    # Insulin (MPC, ZOH)
     plt.subplot(3, 1, 2)
     plt.step(t_mpc, I, where="post", label="Insulin infusion")
     plt.ylabel("Insulin (mU/min)")
     plt.grid(True)
     plt.legend()
 
-    # ---- Glucagon (MPC, ZOH) ----
+    # Glucagon (MPC, ZOH)
     plt.subplot(3, 1, 3)
     plt.step(t_mpc, Gg, where="post", label="Glucagon infusion")
     plt.ylabel("Glucagon (mg/min)")
