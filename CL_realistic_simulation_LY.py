@@ -188,11 +188,10 @@ def run_closed_loop(sim_duration_min=2000):
     insulin = []
     glucagon_inf = []
 
-    ## --- Disturbance schedule (Fig. 13 vs Fig. 14 style) ---
+    ## --- Disturbance schedule ---
     # Case 1: one disturbance
-    # Case 2: one disturbance + another at 1600 min
     DISTURBANCE_CASE = 1
-    MEAL_GRAMS = 50.0  # paper refers to meal modelling in grams
+    MEAL_GRAMS = 50.0  # grams
 
     if DISTURBANCE_CASE == 1:
         meal_events = [250.0]
