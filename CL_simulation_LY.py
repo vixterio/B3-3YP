@@ -31,6 +31,13 @@ import SORENSEN_MODEL_TPB as sorensen
 BASAL_GLUCAGON = 0.34   # mg/min
 BASAL_INSULIN = 0.0
 
+# Pump-like basal insulin as periodic micro-bolus pulses
+ENABLE_BASAL_PULSES = True
+BASAL_PERIOD_MIN = 200.0      # matches the figure's ~200 min spacing
+BASAL_PULSE_WIDTH_MIN = 10.0  # short pulse duration
+BASAL_PULSE_RATE = 10.0       # mU/min during the pulse (tune slightly if needed)
+
+
 # Disable Sorensen internal controller
 def zero_controller(y):
     return 0.0, 0.0
@@ -57,26 +64,46 @@ from SORENSEN_MODEL_TPB import (
     STATE_ORDER
 )
 
+# Meal absorption model
+K_ABS = 1.0 / 40.0  # 1/min (time constant ~40 min)
+
 # Simulate nonlinear Sorensen for one MPC step
-def sorensen_step(x, u, dt, meal=0.0, n_substeps=50):
+def sorensen_step(x_aug, u, dt, meal_mg=0.0, n_substeps=50):
+    """
+    x_aug includes the 19 Sorensen states plus one extra state at the end:
+      D_meal [mg] = glucose in a gut reservoir that appears into plasma with 1st-order kinetics.
 
-    uI, uG_mg = u
-    uG = uG_mg * 1e9  # convert mg/min → pg/min
+    meal_mg is the bolus amount added to D_meal at the start of this step.
+    """
 
-    x0 = x.copy()
+    uI_mU, uG_mg = u
+
+    # Conver to Sorensen internal units
+    uI = uI_mU * 1e3
+    uG = uG_mg * 1e9
+
+    # Add meal bolus to resevoir (mg)
+    x0 = x_aug.copy()
+    x0[-1] += float(meal_mg)  # add meal bolus into reservoir (mg)
 
     # Apply meal disturbance
-    # Meal interpreted as total mg over dt
-    meal_rate = meal / dt  # mg/min
 
     def wrapped_odes(t, y):
-        dydt = sorensen_odes(t, y, uI, uG)
 
-        # Inject meal into plasma glucose derivative
-        # dG_PV += meal_rate / Vg_PV
-        dydt[0] += meal_rate / sorensen.Vg_PV
+        ys = y[:19] # Soresen states
+        Dm = y[19] # meal resevoir state
 
-        return dydt
+        # PLant ODEs in Sorensen coordinates
+        dydt_s = sorensen_odes(t, ys, uI, uG)
+
+         # meal reservoir -> plasma appearance
+        dDm = -K_ABS * Dm
+        Ra = K_ABS * Dm  # mg/min
+
+        # add appearance to plasma glucose derivative
+        dydt_s[0] += Ra / sorensen.Vg_PV
+
+        return np.concatenate([dydt_s, [dDm]])
 
     t_eval = np.linspace(0.0, dt, n_substeps)
 
@@ -101,16 +128,30 @@ def run_closed_loop(sim_duration_min=2000):
     A, B, C = model["A"], model["B"], model["C"]
     x_star, u_star = model["x_star"], model["u_star"]
 
+    y_star = float((C @ x_star)[0])
+
+    # Convert TPB linear model input units -> MPC paper units
+    B = B.copy()
+    B[:, 0] *= 1e3   # µU/min basis -> mU/min basis
+    B[:, 1] *= 1e9   # pg/min basis -> mg/min basis
+
+    # Convert TPB equilibrium inputs to paper units too
+    u_star = np.array(u_star, dtype=float).copy()
+    u_star[0] /= 1e3  # µU/min -> mU/min
+    u_star[1] /= 1e9  # pg/min -> mg/min
+
+    # Discretise
     A_d, B_d = zoh_discretise(A, B, TAU_S_MIN)
 
     # MPC
     mpc = MPCController(A_d, B_d, C, tau_s_min=TAU_S_MIN, Np=NP, Nc=NC)
 
     # Initial nonlinear plant state
-    x_true = np.array([initial_conditions[k] for k in STATE_ORDER], dtype=float)
+    x_true_19 = np.array([initial_conditions[k] for k in STATE_ORDER], dtype=float)
+    x_true = np.concatenate([x_true_19, [0.0]])  # D_meal = 0 mg
 
     # Deviation coordinates for MPC
-    x_dev = np.zeros(A_d.shape[0])
+    x_dev = x_true[:19] - x_star
     u_prev_dev = np.zeros(2)
 
     sim_steps = int(sim_duration_min / TAU_S_MIN)
@@ -121,33 +162,42 @@ def run_closed_loop(sim_duration_min=2000):
     insulin = []
     glucagon_inf = []
 
-    # Random unannounced meal
-    rng = np.random.default_rng(7)
+    ## --- Disturbance schedule (Fig. 13 vs Fig. 14 style) ---
+    # Case 1: one disturbance
+    # Case 2: one disturbance + another at 1600 min
+    DISTURBANCE_CASE = 1
+    MEAL_GRAMS = 50.0  # paper refers to meal modelling in grams
+
+    if DISTURBANCE_CASE == 1:
+        meal_events = [250.0]
+    else:
+        meal_events = [250.0, 1600.0]
 
     for k in range(sim_steps):
 
-        # Meal disturbance
-        meal = 0.0
         current_time = k * TAU_S_MIN
-        if current_time >= 250:
-            if rng.random() < 0.002:
-                meal = rng.uniform(30, 50)  # mg
-            else:
-                meal = 0.0
+
+        # Meal disturbance (unannounced)
+        meal_mg = 0.0
+        for t_evt in meal_events:
+            # trigger exactly on the sample that hits the event time
+            if abs(current_time - t_evt) < 1e-12:
+                meal_mg = MEAL_GRAMS * 1000.0  # g -> mg
+                break
 
         # Measurement
         G_PI = x_true[7]
         
-        t_mpc.append(k * TAU_S_MIN)
-        t_glucose.append(k * TAU_S_MIN) 
+        t_mpc.append(current_time)
+        t_glucose.append(current_time) 
         glucose.append(G_PI)
 
         # MPC state correction (paper assumption)
-        y_dev_meas = G_PI - R_SETPOINT
+        # enforce that the deviation state's measured output matches the plant measurement
+        y_dev_meas = G_PI - y_star
+        y_dev_model = float((C @ x_dev)[0])
 
-        y_model = (C @ x_dev)[0]
-        e = (G_PI - R_SETPOINT) - y_model
-        x_dev = x_dev + 0.05 * C.T.flatten() * e
+        x_dev[7] += (y_dev_meas - y_dev_model)   # C selects state 7 (G_PI) in TPB model
 
 
         # Supervisory switching MPC
@@ -162,21 +212,27 @@ def run_closed_loop(sim_duration_min=2000):
         u_dev, _ = mpc.compute_control(
             xk=x_dev,
             uk_prev=u_prev_dev,
-            r_dev=0.0,
-            y_min_dev=Y_MIN - R_SETPOINT,
-            y_max_dev=Y_MAX - R_SETPOINT,
+            r_dev=R_SETPOINT - y_star,
+            y_min_dev=Y_MIN - y_star,
+            y_max_dev=Y_MAX - y_star,
             mode=mode,
             lambda_u=None
         )
 
         if mode in ["BOLUS", "BASAL"]:
-            u_star_mode = np.array([u_star[0], 0.0])  # no glucagon baseline
+            u_star_mode = np.array([u_star[0], 0.0], dtype=float)  # no glucagon baseline
         elif mode == "GLUCAGON":
-            u_star_mode = np.array([0.0, u_star[1]])  # no insulin baseline
+            u_star_mode = np.array([0.0, BASAL_GLUCAGON], dtype=float)  # no insulin baseline
 
 
         u = u_dev + u_star_mode
-        uI = u[0]   # mU/min
+    
+        # Add pump basal pulses on top of MPC command (independent of controller logic)
+        if ENABLE_BASAL_PULSES:
+            phase = (current_time % BASAL_PERIOD_MIN)
+            if phase < BASAL_PULSE_WIDTH_MIN:
+                u[0] += BASAL_PULSE_RATE
+
 
         # Store absolute values for plotting
         insulin.append(u[0])
@@ -184,12 +240,11 @@ def run_closed_loop(sim_duration_min=2000):
 
 
         # Nonlinear plant update
-        x_true, G_trace = sorensen_step(x_true, u, TAU_S_MIN, meal=meal, n_substeps=20)
+        x_true, G_trace = sorensen_step(x_true, u, TAU_S_MIN, meal_mg=meal_mg, n_substeps=20)
 
-        dt_sub = TAU_S_MIN / (len(G_trace)-1)
         # Append internal glucose trajectory for smooth plot
-        for i, g in enumerate(G_trace[1:]):
-            t_glucose.append(k * TAU_S_MIN + (i+1) * (TAU_S_MIN / len(G_trace)))
+        for i, g in enumerate(G_trace[1:], start=1):
+            t_glucose.append(current_time + i * (TAU_S_MIN / (len(G_trace) - 1)))
             glucose.append(g)
 
         # Linear model update (for MPC)

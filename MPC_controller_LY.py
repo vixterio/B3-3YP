@@ -105,7 +105,7 @@ def load_continuous_linear_model():
 
 def zoh_discretise(A, B, tau_s_min):
     """Discretise (A,B) with ZOH. tau_s_min in minutes -> convert to seconds."""
-    dt = float(tau_s_min) * 60.0
+    dt = float(tau_s_min) #* 60.0  # convert minutes to seconds for discretisation
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
     C_dummy = np.zeros((1, A.shape[0])) # ZOH needs C,D but we only want A,B. Discretisation of A,B is independent of C,D.
