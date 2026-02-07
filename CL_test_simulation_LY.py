@@ -234,7 +234,7 @@ if __name__ == "__main__":
     plt.legend()
 
     plt.subplot(3, 1, 3)
-    plt.step(t_mpc, Gg, where="post", label="Glucagon")
+    plt.step(t_mpc, 1e3* Gg, where="post", label="Glucagon")
     plt.ylabel("Glucagon (mg/min)")
     plt.xlabel("Time (min)")
     plt.grid(True)
