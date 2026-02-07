@@ -1,24 +1,55 @@
 """
-CL_simulation_LY.py
+CL_realistic_simulation_LY.py
 
-Closed-loop simulation of dual-hormone MPC controlling the
-nonlinear Sorensen glucose–insulin–glucagon model.
+Closed-loop simulation of a dual-hormone MPC controller applied to the
+nonlinear Sorensen glucose–insulin–glucagon model under physiologically
+realistic disturbances.
 
-This script uses the state-space formulation:
+This script evaluates the performance and limitations of a fixed linear
+Model Predictive Controller when subjected to unannounced meals modelled
+using explicit glucose absorption dynamics.
 
-    x_{k+1} = A x_k + B u_k
-    y_k     = C x_k + e_k
+System formulation:
+
+    Nonlinear plant (Sorensen model):
+        ẋ = f(x, u, d)
+
+    Linear prediction model used by MPC:
+        x_{k+1} = A x_k + B u_k
+        y_k     = C x_k + e_k
 
 where:
-- x is the nonlinear Sorensen state
+- x represents the nonlinear Sorensen physiological state
 - u = [u1, u2] are insulin and glucagon infusion rates
 - y is the peripheral glucose measurement (G_PI)
-- e_k represents unmeasured disturbances (e.g. meals)
-    - this is not modelled explicitly, propagated or fed into the MPC
-- The MPC uses a linearised model (A,B,C) around the nominal point
-- Feedback occurs via G_PI measurement only
+- d represents unmeasured physiological disturbances (meals)
+- e_k is an output mismatch term capturing unmodelled disturbances
 
+Key characteristics of this simulation:
+- Meals are modelled explicitly using a gut glucose reservoir with
+  first-order absorption dynamics, producing delayed and nonlinear
+  glucose appearance.
+- The MPC relies on a single linearisation of the Sorensen model
+  around a nominal basal operating point (approximately 90 mg/dL).
+- Disturbances are unannounced and are NOT included explicitly in the
+  MPC prediction model.
+- Feedback to the controller is provided solely via peripheral glucose
+  measurements (G_PI).
+- Supervisory logic switches between insulin-only, basal, and glucagon-
+  only control modes based on glucose thresholds.
+
+Purpose of this script:
+- To assess how a theoretically motivated linear MPC performs when
+  confronted with realistic physiological disturbances.
+- To highlight the limitations of fixed linear MPC in suppressing
+  large postprandial glucose excursions.
+- To provide a baseline for future extensions such as disturbance-
+  augmented MPC, gain scheduling, or data-driven adaptation.
+
+This simulation is intentionally more realistic than the original
+paper setup.
 """
+
 
 import sys
 import numpy as np
@@ -130,18 +161,13 @@ def run_closed_loop(sim_duration_min=2000):
 
     y_star = float((C @ x_star)[0])
 
-    # Convert TPB linear model input units -> MPC paper units
-    B = B.copy()
-    B[:, 0] *= 1e3   # µU/min basis -> mU/min basis
-    B[:, 1] *= 1e9   # pg/min basis -> mg/min basis
-
-    # Convert TPB equilibrium inputs to paper units too
-    u_star = np.array(u_star, dtype=float).copy()
-    u_star[0] /= 1e3  # µU/min -> mU/min
-    u_star[1] /= 1e9  # pg/min -> mg/min
-
     # Discretise
     A_d, B_d = zoh_discretise(A, B, TAU_S_MIN)
+
+    print("||B_d||:", np.linalg.norm(B_d))
+    print("B_d (first 4 rows):\n", B_d[:4,:])
+    print("Np, Nc:", NP, NC)
+
 
     # MPC
     mpc = MPCController(A_d, B_d, C, tau_s_min=TAU_S_MIN, Np=NP, Nc=NC)
@@ -192,14 +218,6 @@ def run_closed_loop(sim_duration_min=2000):
         t_glucose.append(current_time) 
         glucose.append(G_PI)
 
-        # MPC state correction (paper assumption)
-        # enforce that the deviation state's measured output matches the plant measurement
-        y_dev_meas = G_PI - y_star
-        y_dev_model = float((C @ x_dev)[0])
-
-        x_dev[7] += (y_dev_meas - y_dev_model)   # C selects state 7 (G_PI) in TPB model
-
-
         # Supervisory switching MPC
         if G_PI > THRESH_HIGH:
             mode = "BOLUS"
@@ -208,22 +226,41 @@ def run_closed_loop(sim_duration_min=2000):
         else:
             mode = "BASAL"
 
+        # MPC state correction
+        y_dev_meas  = G_PI - y_star
+        y_dev_model = float((C @ x_dev)[0])
+        e_dev = y_dev_meas - y_dev_model   # output disturbance estimate (paper’s ek idea)
+
+        u_prev_for_mpc = u_prev_dev.copy()
+    
+        if mode in ["BOLUS", "BASAL"]:
+            u_prev_for_mpc[1] = 0.0  # glucagon is disabled in these modes
+        elif mode == "GLUCAGON":
+            u_prev_for_mpc[0] = 0.0  # insulin is disabled in this mode
+
+
         # MPC
-        u_dev, _ = mpc.compute_control(
+        u_dev, info = mpc.compute_control(
             xk=x_dev,
-            uk_prev=u_prev_dev,
+            uk_prev=u_prev_for_mpc,
             r_dev=R_SETPOINT - y_star,
             y_min_dev=Y_MIN - y_star,
             y_max_dev=Y_MAX - y_star,
             mode=mode,
-            lambda_u=None
+            lambda_u=None,
+            y_bias_dev=e_dev  # feed disturbance estimate back into MPC as bias
         )
+
+        if abs(current_time - 250.0) < 50:   # a small window around meal
+            print(current_time, mode, "G_PI", G_PI, "u_dev", u_dev, "status", info.get("qp_status"))
+
 
         if mode in ["BOLUS", "BASAL"]:
             u_star_mode = np.array([u_star[0], 0.0], dtype=float)  # no glucagon baseline
         elif mode == "GLUCAGON":
             u_star_mode = np.array([0.0, BASAL_GLUCAGON], dtype=float)  # no insulin baseline
 
+        u_star_mode = np.array([u_star[0], u_star[1]], dtype=float)  # insulin baseline is zero, glucagon baseline is constant
 
         u = u_dev + u_star_mode
     
@@ -248,8 +285,11 @@ def run_closed_loop(sim_duration_min=2000):
             glucose.append(g)
 
         # Linear model update (for MPC)
-        x_dev = A_d @ x_dev + B_d @ u_dev
-        u_prev_dev = u_dev.copy()
+        u_applied_dev = u - u_star  # deviation from mode-specific baseline
+        x_dev = A_d @ x_dev + B_d @ u_applied_dev
+
+        # Store previous deviation input for next MPC iteration
+        u_prev_dev = u_applied_dev.copy()
 
     return np.array(t_glucose), np.array(glucose), np.array(t_mpc),np.array(insulin), np.array(glucagon_inf)
 

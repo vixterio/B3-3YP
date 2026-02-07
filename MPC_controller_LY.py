@@ -65,7 +65,7 @@ THRESH_LOW = 80.0
 BASAL_U1_MAX = 10.0  # mU/min (tune if needed)
 
 # Soft-constraint penalty for output bounds (prevents infeasible QP -> zero control)
-SOFT_Y_PENALTY = 1e6
+SOFT_Y_PENALTY = 1e3
 
 
 
@@ -100,18 +100,40 @@ def load_continuous_linear_model():
     x_star = getattr(mod, "x_star", None)
     u_star = getattr(mod, "u_star", None)
 
+    if u_star is not None:
+        # If you use u_star anywhere (baseline), convert it too:
+        u_star = np.array(u_star, dtype=float)
+        u_star[0] /= 1e3   # µU/min -> mU/min
+        u_star[1] /= 1e9   # pg/min -> mg/min
+    else: 
+        u_star = np.zeros((2,), dtype=float)
+
     return {"A": A, "B": B, "C": C, "tau_s": tau_s, "x_star": x_star, "u_star": u_star, "source": modname}
 
 
 def zoh_discretise(A, B, tau_s_min):
-    """Discretise (A,B) with ZOH. tau_s_min in minutes -> convert to seconds."""
+    """Discretise (A,B) with ZOH. tau_s_min in minutes -> convert to seconds.
+        Also includes a unit conversion.
+    """
     dt = float(tau_s_min) #* 60.0  # convert minutes to seconds for discretisation
     A = np.asarray(A, dtype=float)
     B = np.asarray(B, dtype=float)
+
+    B = B.copy()
+    B[:, 0] *= 1e3
+    B[:,1] *= 1e9
+
     C_dummy = np.zeros((1, A.shape[0])) # ZOH needs C,D but we only want A,B. Discretisation of A,B is independent of C,D.
     D_dummy = np.zeros((1, B.shape[1]))
     out = signal.cont2discrete((A, B, C_dummy, D_dummy), dt, method="zoh")
     A_d, B_d = np.asarray(out[0]), np.asarray(out[1])
+
+    # Diagnostic print (temporary)
+    print("[zoh_discretise] dt (min):", dt)
+    print("[zoh_discretise] ||B_cont (scaled)||:", np.linalg.norm(B))
+    print("[zoh_discretise] ||B_d||:", np.linalg.norm(B_d))
+    print("[zoh_discretise] B_d[7,:] (G_PI row):", B_d[7, :])
+
     return A_d, B_d
 
 
@@ -177,6 +199,7 @@ class MPCController:
                         y_min_dev, y_max_dev,
                         mode: str,
                         lambda_u=None,
+                        y_bias_dev=0.0,
                         solver=cp.OSQP, verbose=False):
         
         # Shortcuts
@@ -201,6 +224,7 @@ class MPCController:
         r_vec = np.ones((Np, 1)) * float(r_dev)
 
         Y0 = (self.Phi @ xk).reshape((Np, 1)) # free response (no future input)
+        bias_vec = np.ones((Np, 1)) * float(y_bias_dev) # bias term to correct model mismatch (if needed)
         deltaU = cp.Variable((m * Nc, 1)) # decision variable: stacked input increments 
 
 
@@ -215,7 +239,7 @@ class MPCController:
 
         Gamma_T = self.Gamma @ T
         Gamma_u0 = self.Gamma @ uk_prev_repeat
-        Y_pred = Y0 + Gamma_u0 + Gamma_T @ deltaU
+        Y_pred = Y0 + bias_vec + Gamma_u0 + Gamma_T @ deltaU
 
         # Soft output constraint slack
         # Allow violation of output constraints via slack variables (no infeasibility)
@@ -234,6 +258,15 @@ class MPCController:
         # Rate bounds (Δu) for actuator limits
         dumin = np.array([-DU1_MAX, -DU2_MAX], dtype=float)
         dumax = np.array([ DU1_MAX,  DU2_MAX], dtype=float)
+
+        # If an actuator is OFF, don't constrain its rate (otherwise mode switches can be infeasible)
+        if mode in ["BOLUS", "BASAL"]:
+            dumin[1] = -1e6
+            dumax[1] =  1e6
+        elif mode == "GLUCAGON":
+            dumin[0] = -1e6
+            dumax[0] =  1e6
+
         for i in range(Nc):
             du_i = deltaU[i*m:(i+1)*m, 0]
             constraints += [du_i >= dumin, du_i <= dumax]
@@ -273,7 +306,17 @@ class MPCController:
         ]
 
         prob = cp.Problem(cp.Minimize(obj), constraints)
-        prob.solve(solver=solver, verbose=verbose)
+        #prob.solve(solver=solver, verbose=verbose)
+        # Giving OSQP more iterations and less tolerances for convergence
+        prob.solve(
+            solver=cp.OSQP,
+            verbose=False,
+            max_iter=20000,
+            eps_abs=1e-4,
+            eps_rel=1e-4,
+            polish=True,
+            warm_start=True
+        )
 
         if prob.status not in ["optimal", "optimal_inaccurate"]:
             return uk_prev.copy(), {"qp_status": prob.status}
