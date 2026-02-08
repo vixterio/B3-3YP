@@ -180,6 +180,12 @@ def run_closed_loop(sim_duration_min=2000):
     x_dev = x_true[:19] - x_star
     u_prev_dev = np.zeros(2)
 
+    # Offset-free disturbance estimate (initialised once)
+    d_hat = 0.0
+
+    # Disturbance observer gain (tune 0.1–0.3)
+    alpha_d = 0.2
+
     sim_steps = int(sim_duration_min / TAU_S_MIN)
     t_glucose = []
     glucose = []    
@@ -189,14 +195,8 @@ def run_closed_loop(sim_duration_min=2000):
     glucagon_inf = []
 
     ## --- Disturbance schedule ---
-    # Case 1: one disturbance
-    DISTURBANCE_CASE = 1
     MEAL_GRAMS = 50.0  # grams
-
-    if DISTURBANCE_CASE == 1:
-        meal_events = [250.0]
-    else:
-        meal_events = [250.0, 1600.0]
+    meal_events = [250.0]
 
     for k in range(sim_steps):
 
@@ -228,7 +228,14 @@ def run_closed_loop(sim_duration_min=2000):
         # MPC state correction
         y_dev_meas  = G_PI - y_star
         y_dev_model = float((C @ x_dev)[0])
-        e_dev = y_dev_meas - y_dev_model   # output disturbance estimate (paper’s ek idea)
+
+        innovation = y_dev_meas - (y_dev_model + d_hat)
+
+        # Disturbacne estimation 
+        d_hat = d_hat + alpha_d * innovation
+
+        # Augemented state passed to MPC
+        x_aug = np.concatenate([x_dev, [d_hat]])
 
         u_prev_for_mpc = u_prev_dev.copy()
     
@@ -240,14 +247,13 @@ def run_closed_loop(sim_duration_min=2000):
 
         # MPC
         u_dev, info = mpc.compute_control(
-            xk=x_dev,
+            xk=x_aug,
             uk_prev=u_prev_for_mpc,
             r_dev=R_SETPOINT - y_star,
             y_min_dev=Y_MIN - y_star,
             y_max_dev=Y_MAX - y_star,
             mode=mode,
-            lambda_u=None,
-            y_bias_dev=e_dev  # feed disturbance estimate back into MPC as bias
+            lambda_u=None
         )
 
         if abs(current_time - 250.0) < 50:   # a small window around meal
@@ -317,7 +323,7 @@ if __name__ == "__main__":
 
     # Glucagon (MPC, ZOH)
     plt.subplot(3, 1, 3)
-    plt.step(t_mpc, Gg, where="post", label="Glucagon infusion")
+    plt.step(t_mpc, 1e3*Gg, where="post", label="Glucagon infusion")
     plt.ylabel("Glucagon (mg/min)")
     plt.xlabel("Time (min)")
     plt.grid(True)

@@ -130,6 +130,12 @@ def run_closed_loop(sim_duration_min=2000):
     x_dev = x_true - x_star
     u_prev_dev = np.zeros(2)
 
+    # Offset-free disturbance estimate (initialised once)
+    d_hat = 0.0
+
+    # Disturbance observer gain (tune 0.1–0.3)
+    alpha_d = 0.2
+
     sim_steps = int(sim_duration_min / TAU_S_MIN)
 
     t_glucose, glucose = [], []
@@ -163,7 +169,15 @@ def run_closed_loop(sim_duration_min=2000):
         # Output bias estimation
         y_dev_meas  = G_PI - y_star
         y_dev_model = float((C @ x_dev)[0])
-        e_dev = y_dev_meas - y_dev_model
+
+        
+        innovation = y_dev_meas - (y_dev_model + d_hat)
+
+        # Disturbacne estimation 
+        d_hat = d_hat + alpha_d * innovation
+
+        # Augemented state passed to MPC
+        x_aug = np.concatenate([x_dev, [d_hat]])
 
         # Ensure disabled actuator has zero previous input
         u_prev_for_mpc = u_prev_dev.copy()
@@ -174,13 +188,12 @@ def run_closed_loop(sim_duration_min=2000):
 
         # MPC solve
         u_dev, info = mpc.compute_control(
-            xk=x_dev,
+            xk=x_aug,
             uk_prev=u_prev_for_mpc,
             r_dev=R_SETPOINT - y_star,
             y_min_dev=Y_MIN - y_star,
             y_max_dev=Y_MAX - y_star,
-            mode=mode,
-            y_bias_dev=e_dev
+            mode=mode
         )
 
         # Apply equilibrium baseline

@@ -139,19 +139,37 @@ def zoh_discretise(A, B, tau_s_min):
 
 class MPCController:
     """
-    Standard linear MPC on an LTI model with input constraints, rate constraints, and
+    Offset-free MPC on an LTI model with input constraints, rate constraints, and
     SOFT output constraints (slack) to avoid infeasibility.
 
-    Note: We enforce the flowchart by passing a "mode" that constrains which actuator(s)
+    We enforce the flowchart by passing a "mode" that constrains which actuator(s)
     are allowed (insulin-only / glucagon-only) and by using basal cap in the basal zone.
     """
     # store in structure,
     def __init__(self, A_d, B_d, C, tau_s_min,
                  Np=NP, Nc=NC,
                  lambda_u=None):
-        self.A = np.asarray(A_d, dtype=float)
-        self.B = np.asarray(B_d, dtype=float)
-        self.C = np.asarray(C, dtype=float).reshape((1, -1))
+        A_d = np.asarray(A_d, dtype=float)
+        B_d = np.asarray(B_d, dtype=float)
+        C = np.asarray(C, dtype=float)
+
+        n = A_d.shape[0]
+        m = B_d.shape[1]
+
+        # Augmented system with output disturbance state d
+        A_aug = np.block([
+            [A_d, np.zeros((n, 1))],
+            [np.zeros((1,n )), np.ones((1,1))]
+        ])
+
+        B_aug = np.vstack([B_d, np.zeros((1, m))])
+
+        C_aug = np.hstack([C, np.ones((1, 1))])  # output measures glucose + disturbance
+
+        self.A = A_aug
+        self.B = B_aug
+        self.C = C_aug
+
         self.tau_s = float(tau_s_min)
         self.Np = int(Np)           # normalise
         self.Nc = int(min(Nc, Np))  # enforce controller design constraint Nc <= Np
@@ -199,7 +217,6 @@ class MPCController:
                         y_min_dev, y_max_dev,
                         mode: str,
                         lambda_u=None,
-                        y_bias_dev=0.0,
                         solver=cp.OSQP, verbose=False):
         
         # Shortcuts
@@ -224,7 +241,6 @@ class MPCController:
         r_vec = np.ones((Np, 1)) * float(r_dev)
 
         Y0 = (self.Phi @ xk).reshape((Np, 1)) # free response (no future input)
-        bias_vec = np.ones((Np, 1)) * float(y_bias_dev) # bias term to correct model mismatch (if needed)
         deltaU = cp.Variable((m * Nc, 1)) # decision variable: stacked input increments 
 
 
@@ -239,7 +255,8 @@ class MPCController:
 
         Gamma_T = self.Gamma @ T
         Gamma_u0 = self.Gamma @ uk_prev_repeat
-        Y_pred = Y0 + bias_vec + Gamma_u0 + Gamma_T @ deltaU
+
+        Y_pred = Y0 + Gamma_u0 + Gamma_T @ deltaU
 
         # Soft output constraint slack
         # Allow violation of output constraints via slack variables (no infeasibility)
