@@ -10,8 +10,7 @@ This repository contains our 3YP group's implementation of the *Dual-Hormone MPC
 ```text
 B3-3YP/
 │
-├── CL_realistic_simulation_LY.py   # Closed-loop simulation with realistic meal dynamics
-├── CL_test_simulation.py           # Paper-style test simulation
+├── CL_simulation_LY.py   # Closed-loop simulation
 ├── MPC_controller_LY.py            # Constrained linear MPC implementation
 ├── SORENSEN_MODEL_TPB.py      # Nonlinear Sorensen physiological model
 ├── LINEARISED_MODEL_TPB.py    # Linearised Sorensen model for MPC
@@ -26,10 +25,6 @@ The closed-loop system follows a standard MPC architecture
 - *Controller*: Linear MPC with constraints and supervisory switching
 - *Feedback*: Peripheral glucose measurement (G_PI)
 - *Disturbances*: Unannounced meals applied only to the nonlinear plant
-
-Two closed-loop simulations are provided:
-- A realistic physiological simulation used to evaluate controller limitations under explicit meal dynamics
-- A paper-style test simulation used to reproduce the qualitative behaviour presented in the reference paper
 
 ---
 
@@ -65,21 +60,8 @@ Additional rules:
 
 ## File Descriptions
 
-### `CL_test_simulation_LY.py`
-Paper-style test simulation.
-This script serves as a reference implementation of the published controller and provides a baseline against which more realistic simulations can be compared.
-
-**Responsibilities:**
-- Implements the same MPC controller under the paper’s theoretical assumptions
-- Uses abstract glucose disturbances rather than physiological meal models
-- Prioritises qualitative agreement with published results
-
-**Run the simulation:**
-```bash
-python CL_test_simulation_LY.py
-```
-### `CL_realistic_simulation_LY.py`
-Closed-loop simulation under physiologically realistic conditions.
+### `CL_simulation_LY.py`
+Closed-loop simulation under multiple options for conditions.
 This script is used to evaluate controller robustness and highlight modelling limitations when realistic nonlinear meal dynamics are present.
 
 **Responsibilities:**
