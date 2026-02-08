@@ -68,7 +68,7 @@ DISTURBANCE_CONFIG = {
         "mode": "realistic",
         "meal_grams": 50.0,
         "meal_events": [250.0],
-        "alpha_d": 0.5
+        "alpha_d": 0.25
     },
 }
 

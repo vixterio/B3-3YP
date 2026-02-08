@@ -181,7 +181,7 @@ class MPCController:
         # damping factor in cost function
         if lambda_u is None:
             # arbitrary default
-            lambda_u = np.diag([1e-4, 1e-4])
+            lambda_u = np.diag([1e-2, 1e-4])
         self.lambda_u = np.asarray(lambda_u, dtype=float)
         if self.lambda_u.ndim == 1:
             self.lambda_u = np.diag(self.lambda_u)
