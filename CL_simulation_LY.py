@@ -1,12 +1,12 @@
 """
-CL_realistic_simulation_LY.py
+CL_simulation_LY.py
 
 Closed-loop simulation of a dual-hormone MPC controller applied to the
 nonlinear Sorensen glucose–insulin–glucagon model under physiologically
 realistic disturbances.
 
 This script evaluates the performance and limitations of a fixed linear
-Model Predictive Controller when subjected to unannounced meals modelled
+Model Predictive Controller augmented with an output disturbance model when subjected to unannounced meals modelled
 using explicit glucose absorption dynamics.
 
 System formulation:
@@ -16,39 +16,61 @@ System formulation:
 
     Linear prediction model used by MPC:
         x_{k+1} = A x_k + B u_k
-        y_k     = C x_k + e_k
+        d_{k+1} = d_k
+        y_k     = C x_k + d_k
 
 where:
 - x represents the nonlinear Sorensen physiological state
 - u = [u1, u2] are insulin and glucagon infusion rates
 - y is the peripheral glucose measurement (G_PI)
-- d represents unmeasured physiological disturbances (meals)
-- e_k is an output mismatch term capturing unmodelled disturbances
+- d represents an unmeasured, persistent output disturbance accounting for
+  modelling errors, unannounced meals, and physiological mismatch
 
 Key characteristics of this simulation:
 - Meals are modelled explicitly using a gut glucose reservoir with
   first-order absorption dynamics, producing delayed and nonlinear
-  glucose appearance.
+  glucose appearance in the nonlinear plant.
 - The MPC relies on a single linearisation of the Sorensen model
   around a nominal basal operating point (approximately 90 mg/dL).
-- Disturbances are unannounced and are NOT included explicitly in the
-  MPC prediction model.
+- Unannounced disturbances are not modelled explicitly in the MPC
+  prediction model, but are compensated using a disturbance-augmented
+  (offset-free) formulation with an online disturbance estimate.
 - Feedback to the controller is provided solely via peripheral glucose
   measurements (G_PI).
-- Supervisory logic switches between insulin-only, basal, and glucagon-
-  only control modes based on glucose thresholds.
+- Supervisory logic switches between insulin-only, basal, and glucagon-only
+  control modes based on glucose thresholds.
 
-Purpose of this script:
-- To assess how a theoretically motivated linear MPC performs when
-  confronted with realistic physiological disturbances.
-- To highlight the limitations of fixed linear MPC in suppressing
-  large postprandial glucose excursions.
-- To provide a baseline for future extensions such as disturbance-
-  augmented MPC, gain scheduling, or data-driven adaptation.
 
-This simulation is intentionally more realistic than the original
-paper setup.
+
 """
+
+# DISTURBANCE SELECTION
+DISTURBANCE_CASE = 2
+# 1: abstract disturbance. Direct perturbation of glucose that does not obey physiology.
+#    idealised, instantaneous meal, easy for a controller to counteract.
+# 2: realistic physiological meal (50g)
+#    delayed, persistent, nonlinear
+#    glucose enters the body gradually through the gut with delays and nonlinear absorption
+
+DISTURBANCE_CONFIG = {
+    1: {
+        "mode": "abstract",
+        "abstract_disturbance": {
+            "t_start": 250.0,
+            "t_end": 350.0,
+            "amplitude": 40.0,   # mg/dL equivalent
+        },
+        "meal_grams": None,
+        "meal_events": [],
+        "alpha_d": 0.2, # manually tuned output disturbance gain 
+    },
+    2: {
+        "mode": "realistic",
+        "meal_grams": 50.0,
+        "meal_events": [250.0],
+        "alpha_d": 0.5
+    },
+}
 
 
 import sys
@@ -99,7 +121,7 @@ from SORENSEN_MODEL_TPB import (
 K_ABS = 1.0 / 40.0  # 1/min (time constant ~40 min)
 
 # Simulate nonlinear Sorensen for one MPC step
-def sorensen_step(x_aug, u, dt, meal_mg=0.0, n_substeps=50):
+def sorensen_step(x_aug, u, dt, DISTURBANCE_MODE, meal_mg=0.0, glucose_disturbance=0.0, n_substeps=50):
     """
     x_aug includes the 19 Sorensen states plus one extra state at the end:
       D_meal [mg] = glucose in a gut reservoir that appears into plasma with 1st-order kinetics.
@@ -120,21 +142,24 @@ def sorensen_step(x_aug, u, dt, meal_mg=0.0, n_substeps=50):
     # Apply meal disturbance
 
     def wrapped_odes(t, y):
-
-        ys = y[:19] # Soresen states
-        Dm = y[19] # meal resevoir state
+        if DISTURBANCE_MODE == "realistic":
+            ys = y[:19] # Soresen states
+            Dm = y[19] # meal resevoir state
+        else:
+            ys = y
 
         # PLant ODEs in Sorensen coordinates
         dydt_s = sorensen_odes(t, ys, uI, uG)
 
-         # meal reservoir -> plasma appearance
-        dDm = -K_ABS * Dm
-        Ra = K_ABS * Dm  # mg/min
+        if DISTURBANCE_MODE == "realistic":
+            dDm = -K_ABS * Dm
+            Ra = K_ABS * Dm
+            dydt_s[0] += Ra / sorensen.Vg_PV
+            return np.concatenate([dydt_s, [dDm]])
+        else:
+            dydt_s[0] += glucose_disturbance / dt
+            return dydt_s
 
-        # add appearance to plasma glucose derivative
-        dydt_s[0] += Ra / sorensen.Vg_PV
-
-        return np.concatenate([dydt_s, [dDm]])
 
     t_eval = np.linspace(0.0, dt, n_substeps)
 
@@ -174,17 +199,24 @@ def run_closed_loop(sim_duration_min=2000):
 
     # Initial nonlinear plant state
     x_true_19 = np.array([initial_conditions[k] for k in STATE_ORDER], dtype=float)
-    x_true = np.concatenate([x_true_19, [0.0]])  # D_meal = 0 mg
+
+    cfg = DISTURBANCE_CONFIG[DISTURBANCE_CASE]
+    DISTURBANCE_MODE = cfg["mode"]
+
+    if DISTURBANCE_MODE == "realistic":
+        x_true = np.concatenate([x_true_19, [0.0]])  # D_meal = 0 mg
+    else:
+        x_true = x_true_19.copy()
 
     # Deviation coordinates for MPC
-    x_dev = x_true[:19] - x_star
+    x_dev = x_true[:len(x_star)] - x_star
     u_prev_dev = np.zeros(2)
 
     # Offset-free disturbance estimate (initialised once)
     d_hat = 0.0
 
-    # Disturbance observer gain (tune 0.1–0.3)
-    alpha_d = 0.2
+    # Disturbance observer gain (MANUALLY TUNED, included in configuration)
+    alpha_d = cfg["alpha_d"]
 
     sim_steps = int(sim_duration_min / TAU_S_MIN)
     t_glucose = []
@@ -195,20 +227,24 @@ def run_closed_loop(sim_duration_min=2000):
     glucagon_inf = []
 
     ## --- Disturbance schedule ---
-    MEAL_GRAMS = 50.0  # grams
-    meal_events = [250.0]
-
+    ## --- Disturbance schedule ---
     for k in range(sim_steps):
 
         current_time = k * TAU_S_MIN
 
-        # Meal disturbance (unannounced)
         meal_mg = 0.0
-        for t_evt in meal_events:
-            # trigger exactly on the sample that hits the event time
-            if abs(current_time - t_evt) < 1e-12:
-                meal_mg = MEAL_GRAMS * 1000.0  # g -> mg
-                break
+        glucose_disturbance = 0.0
+
+        if DISTURBANCE_MODE == "realistic":
+            for t_evt in cfg.get("meal_events", []):
+                if abs(current_time - t_evt) < 1e-12:
+                    meal_mg = cfg["meal_grams"] * 1000.0  # g -> mg
+                    break
+
+        elif DISTURBANCE_MODE == "abstract":
+            dcfg = cfg["abstract_disturbance"]
+            if dcfg["t_start"] <= current_time <= dcfg["t_end"]:
+                glucose_disturbance = dcfg["amplitude"]
 
         # Measurement
         G_PI = x_true[7]
@@ -282,7 +318,14 @@ def run_closed_loop(sim_duration_min=2000):
 
 
         # Nonlinear plant update
-        x_true, G_trace = sorensen_step(x_true, u, TAU_S_MIN, meal_mg=meal_mg, n_substeps=20)
+        x_true, G_trace = sorensen_step(
+            x_true,
+            u,
+            TAU_S_MIN,
+            DISTURBANCE_MODE=DISTURBANCE_MODE,
+            meal_mg=meal_mg,
+            glucose_disturbance=glucose_disturbance,
+            n_substeps=20)
 
         # Append internal glucose trajectory for smooth plot
         for i, g in enumerate(G_trace[1:], start=1):
