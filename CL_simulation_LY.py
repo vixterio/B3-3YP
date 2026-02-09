@@ -45,7 +45,7 @@ Key characteristics of this simulation:
 """
 
 # DISTURBANCE SELECTION
-DISTURBANCE_CASE = 2
+DISTURBANCE_CASE = 1
 # 1: abstract disturbance. Direct perturbation of glucose that does not obey physiology.
 #    idealised, instantaneous meal, easy for a controller to counteract.
 # 2: realistic physiological meal (50g)
@@ -58,11 +58,11 @@ DISTURBANCE_CONFIG = {
         "abstract_disturbance": {
             "t_start": 250.0,
             "t_end": 350.0,
-            "amplitude": 40.0,   # mg/dL equivalent
+            "amplitude": 50.0,   # mg/dL equivalent
         },
         "meal_grams": None,
         "meal_events": [],
-        "alpha_d": 0.2, # manually tuned output disturbance gain 
+        "alpha_d": 0.08, # manually tuned output disturbance gain 
     },
     2: {
         "mode": "realistic",
