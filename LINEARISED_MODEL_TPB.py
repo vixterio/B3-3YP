@@ -416,6 +416,7 @@ def compute_A(x_star, u_star, eps=1e-6):
         f1 = sorensen_odes(0.0, x_star + dx, u_star[0], u_star[1])
         A[:, j] = (f1 - f0) / eps
 
+
     return A
 
 
