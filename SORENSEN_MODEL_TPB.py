@@ -24,7 +24,7 @@ Qg_L  = 12.6 #dL/min
 Qg_G  = 10.1 #dL/min
 Qg_K  = 10.1 #dL/min
 Qg_P = 15.1 #dL/min
-
+ 
 Tg_B = 2.1 #min
 Tg_P = 5.0 #min
 
