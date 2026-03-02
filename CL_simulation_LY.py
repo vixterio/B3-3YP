@@ -73,6 +73,7 @@ DISTURBANCE_CONFIG = {
 }
 
 
+import math
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
@@ -267,7 +268,7 @@ def run_closed_loop(sim_duration_min=2000):
 
         innovation = y_dev_meas - (y_dev_model + d_hat)
 
-        # Disturbacne estimation 
+        # Disturbance estimation 
         d_hat = d_hat + alpha_d * innovation
 
         # Augemented state passed to MPC
@@ -339,7 +340,73 @@ def run_closed_loop(sim_duration_min=2000):
         # Store previous deviation input for next MPC iteration
         u_prev_dev = u_applied_dev.copy()
 
-    return np.array(t_glucose), np.array(glucose), np.array(t_mpc),np.array(insulin), np.array(glucagon_inf)
+    
+
+    # --- evaluate performance (exclude first 200 minutes) ---
+    
+    from PERFORMANCE_METRICS_TPB import evaluate_glucose_trace, compute_metrics
+
+    # --- prepare arrays collected during the loop (your existing names) ---
+    glucose_array = np.asarray(glucose, dtype=float)    # full trace (for plotting / return)
+    t_g_array     = np.asarray(t_glucose, dtype=float)  # time vector collected in sim
+
+    
+        # --- infer sampling period robustly from the time vector ---
+    if t_g_array.size >= 2:
+        dt_vals = np.diff(t_g_array)
+        median_dt = float(np.median(dt_vals))
+
+        # Robust unit test:
+        # - If the trace runs to large times (e.g. > 500) we assume t_g_array is already in minutes.
+        # - Otherwise fall back to the previous heuristic (if median_dt very large, treat as minutes).
+        if np.nanmax(t_g_array) > 500.0:
+            dt_minutes = median_dt
+            time_unit = "minutes (from t_g_array max > 500)"
+        else:
+            # If median_dt is large ( > 10 ) treat it as minutes; otherwise treat it as seconds and convert.
+            if median_dt > 10.0:
+                dt_minutes = median_dt
+                time_unit = "minutes (median_dt > 10)"
+            else:
+                dt_minutes = median_dt / 60.0
+                time_unit = "seconds (converted to minutes)"
+    else:
+        # fallback: try to use TAU_S_MIN if defined, else default to 1.0 minute
+        try:
+            dt_minutes = float(TAU_S_MIN)
+            time_unit = "fallback TAU_S_MIN (minutes)"
+        except NameError:
+            dt_minutes = 1.0
+            time_unit = "fallback default (1.0 minute)"
+
+    # safety: do not let dt_minutes be zero or NaN
+    if not np.isfinite(dt_minutes) or dt_minutes <= 0:
+        dt_minutes = float(TAU_S_MIN) if 'TAU_S_MIN' in globals() else 1.0
+        time_unit += " [corrected fallback]"
+
+    print(f"DEBUG: inferred sampling interval = {dt_minutes:.6f} minutes  ({time_unit})")
+    print(f"DEBUG: total samples = {glucose_array.size} -> total duration = {glucose_array.size * dt_minutes:.1f} minutes")
+
+    # --- compute n_skip to remove first 200 minutes ---
+    n_skip = int(math.floor(200.0 / dt_minutes))
+    # clamp n_skip so we always keep at least 2 samples for evaluation
+    n_skip = max(0, min(n_skip, max(0, glucose_array.size - 2)))
+
+    print(f"Ignoring first {n_skip} samples (~{n_skip * dt_minutes:.1f} minutes) for evaluation")
+
+    glucose_trimmed = glucose_array[n_skip:]
+    # double-check durations
+    print(f"Trimmed samples: {glucose_trimmed.size}, Trimmed duration (min): {glucose_trimmed.size * dt_minutes:.1f}")
+
+
+
+    # --- call evaluator with the correct dt_minutes ---
+    res = evaluate_glucose_trace(glucose_trimmed, dt_minutes=dt_minutes)
+
+    print("Final composite J (trimmed):", res['J'])
+    
+    # return numeric arrays (safer for later scaling / plotting)
+    return t_g_array, glucose_array, np.asarray(t_mpc, dtype=float), np.asarray(insulin, dtype=float), np.asarray(glucagon_inf, dtype=float)
 
 
 
@@ -366,7 +433,9 @@ if __name__ == "__main__":
 
     # Glucagon (MPC, ZOH)
     plt.subplot(3, 1, 3)
-    plt.step(t_mpc, 1e3*Gg, where="post", label="Glucagon infusion")
+    #plt.step(t_mpc, 1e3*Gg, where="post", label="Glucagon infusion")
+    # convert to numpy and scale to desired units for plotting
+    plt.step(t_mpc, 1e3 * np.asarray(Gg, dtype=float), where="post", label="Glucagon infusion (x1e3)")
     plt.ylabel("Glucagon (mg/min)")
     plt.xlabel("Time (min)")
     plt.grid(True)
