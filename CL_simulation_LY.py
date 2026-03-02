@@ -88,7 +88,7 @@ BASAL_INSULIN = 0.0
 ENABLE_BASAL_PULSES = True
 BASAL_PERIOD_MIN = 200.0      # matches the figure's ~200 min spacing
 BASAL_PULSE_WIDTH_MIN = 10.0  # short pulse duration
-BASAL_PULSE_RATE = 10.0       # mU/min during the pulse (tune slightly if needed)
+BASAL_PULSE_RATE = 1.0      # mU/min during the pulse (tune slightly if needed)
 
 
 # Disable Sorensen internal controller

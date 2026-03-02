@@ -318,7 +318,7 @@ class MPCController:
 
         # Soft output bounds
         constraints += [
-            Y_pred >= y_min_dev - s,
+            Y_pred >= y_min_dev ,
             Y_pred <= y_max_dev + s
         ]
 
