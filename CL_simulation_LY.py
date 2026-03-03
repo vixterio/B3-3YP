@@ -416,10 +416,35 @@ if __name__ == "__main__":
 
     plt.figure(figsize=(12, 9))
 
+    # # Glucose (continuous)
+    # plt.subplot(3, 1, 1)
+    # plt.plot(t_g, G, label="Glucose (G_PI)")
+    # plt.axhline(90, linestyle="--", color="k", label="Setpoint 90")
+    # plt.axhline(70, linestyle=":", color="r", label="Hypo threshold 70")
+    # plt.ylabel("Glucose (mg/dL)")
+    # plt.grid(True)
+    # plt.legend()
+
     # Glucose (continuous)
     plt.subplot(3, 1, 1)
-    plt.plot(t_g, G, label="Glucose (G_PI)")
-    plt.axhline(90, linestyle="--", color="k", label="Setpoint 90")
+    cutoff = 200  # minutes
+    # Masks
+    mask_initial = t_g <= cutoff
+    mask_rest = t_g > cutoff
+    # First 200 min → dashed
+    plt.plot(t_g[mask_initial],
+            G[mask_initial],
+            linestyle='--',
+            color = 'blue',
+            label="Glucose (first 200 min)")
+    # After 200 min → solid
+    plt.plot(t_g[mask_rest],
+            G[mask_rest],
+            linestyle='-',
+            color = 'blue',
+            label="Glucose (G_PI)")
+    plt.axhline(90, linestyle=":", color="k", label="Setpoint 90")
+    plt.axhline(70, linestyle=":", color="r", label="Hypo threshold 70")
     plt.ylabel("Glucose (mg/dL)")
     plt.grid(True)
     plt.legend()
