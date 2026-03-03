@@ -342,7 +342,7 @@ def run_closed_loop(sim_duration_min=2000):
 
     
 
-    # --- evaluate performance (exclude first 200 minutes) ---
+    # --- evaluate performance (exclude first 200 minutes) --- Tommy
     
     from PERFORMANCE_METRICS_TPB import evaluate_glucose_trace, compute_metrics
 
