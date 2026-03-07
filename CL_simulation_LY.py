@@ -87,7 +87,7 @@ BASAL_INSULIN = 0.0
 
 # Pump-like basal insulin as periodic micro-bolus pulses
 ENABLE_BASAL_PULSES = True
-BASAL_PERIOD_MIN = 200.0      # matches the figure's ~200 min spacing
+BASAL_PERIOD_MIN = 200.0   
 BASAL_PULSE_WIDTH_MIN = 10.0  # short pulse duration
 BASAL_PULSE_RATE = 1.0      # mU/min during the pulse (tune slightly if needed)
 
@@ -194,7 +194,6 @@ def run_closed_loop(sim_duration_min=2000):
     print("B_d (first 4 rows):\n", B_d[:4,:])
     print("Np, Nc:", NP, NC)
 
-
     # MPC
     mpc = MPCController(A_d, B_d, C, tau_s_min=TAU_S_MIN, Np=NP, Nc=NC)
 
@@ -227,8 +226,7 @@ def run_closed_loop(sim_duration_min=2000):
     insulin = []
     glucagon_inf = []
 
-    ## --- Disturbance schedule ---
-    ## --- Disturbance schedule ---
+    ## Disturbance schedule
     for k in range(sim_steps):
 
         current_time = k * TAU_S_MIN
@@ -293,35 +291,34 @@ def run_closed_loop(sim_duration_min=2000):
             lambda_u=None
         )
 
-        if abs(current_time - 250.0) < 50:   # a small window around meal
-            print(current_time, mode, "G_PI", G_PI, "u_dev", u_dev, "status", info.get("qp_status"))
-
+        u_abs = u_dev + u_star
 
         if mode in ["BOLUS", "BASAL"]:
             u_star_mode = np.array([u_star[0], 0.0], dtype=float)  # no glucagon baseline
         elif mode == "GLUCAGON":
             u_star_mode = np.array([0.0, BASAL_GLUCAGON], dtype=float)  # no insulin baseline
 
-        u_star_mode = np.array([u_star[0], u_star[1]], dtype=float)  # insulin baseline is zero, glucagon baseline is constant
-
-        u = u_dev + u_star_mode
+        # u_star_mode = np.array([u_star[0], u_star[1]], dtype=float)  # insulin baseline is zero, glucagon baseline is constant
+        # Hard nonnegativity (physical pump constraint)
+        u_abs[0] = max(0.0, u_abs[0])
+        u_abs[1] = max(0.0, u_abs[1])
     
         # Add pump basal pulses on top of MPC command (independent of controller logic)
         if ENABLE_BASAL_PULSES:
             phase = (current_time % BASAL_PERIOD_MIN)
             if phase < BASAL_PULSE_WIDTH_MIN:
-                u[0] += BASAL_PULSE_RATE
+                u_abs[0] += BASAL_PULSE_RATE
 
 
         # Store absolute values for plotting
-        insulin.append(u[0])
-        glucagon_inf.append(u[1])
+        insulin.append(u_abs[0])
+        glucagon_inf.append(u_abs[1])
 
 
         # Nonlinear plant update
         x_true, G_trace = sorensen_step(
             x_true,
-            u,
+            u_abs,
             TAU_S_MIN,
             DISTURBANCE_MODE=DISTURBANCE_MODE,
             meal_mg=meal_mg,
@@ -334,7 +331,7 @@ def run_closed_loop(sim_duration_min=2000):
             glucose.append(g)
 
         # Linear model update (for MPC)
-        u_applied_dev = u - u_star  # deviation from mode-specific baseline
+        u_applied_dev = u_abs - u_star  # deviation from mode-specific baseline
         x_dev = A_d @ x_dev + B_d @ u_applied_dev
 
         # Store previous deviation input for next MPC iteration
@@ -458,9 +455,7 @@ if __name__ == "__main__":
 
     # Glucagon (MPC, ZOH)
     plt.subplot(3, 1, 3)
-    #plt.step(t_mpc, 1e3*Gg, where="post", label="Glucagon infusion")
-    # convert to numpy and scale to desired units for plotting
-    plt.step(t_mpc, 1e3 * np.asarray(Gg, dtype=float), where="post", label="Glucagon infusion (x1e3)")
+    plt.step(t_mpc, 1e3*Gg, where="post", label="Glucagon infusion")
     plt.ylabel("Glucagon (mg/min)")
     plt.xlabel("Time (min)")
     plt.grid(True)
