@@ -344,6 +344,68 @@ def sorensen_step(
         return sol.y[:, -1], sol.y[7, :]
     return sol.y[:, -1], sol.y[7, :]
 
+
+
+
+def integrate_command(time_vec, command_vec):
+    """
+    Robust trapezoidal integration of command_vec over time_vec (both in minutes).
+    Returns total delivered (units of `command_vec` * minutes).
+    This implementation avoids using np.trapz to prevent issues with a missing
+    attribute and handles a few edge cases.
+    """
+    import numpy as _np  # local import to reduce chance of shadowing issues
+    t = _np.asarray(time_vec, dtype=float)
+    cmd = _np.asarray(command_vec, dtype=float)
+
+    if t.size == 0 or cmd.size == 0:
+        return 0.0
+
+    # If lengths match, do standard trapezoidal integration:
+    if t.shape == cmd.shape and t.size >= 2:
+        dt = _np.diff(t)                  # length N-1
+        mid = 0.5 * (cmd[:-1] + cmd[1:])  # length N-1
+        return float(_np.sum(mid * dt))
+
+    # If cmd is sampled at MPC-step times (one value per MPC step) but
+    # t contains a finer glucose trace, try to infer uniform dt from t and
+    # multiply sum(cmd)*dt as a fallback.
+    if t.size >= 2:
+        inferred_dt = float(_np.median(_np.diff(t)))
+        return float(_np.sum(cmd) * inferred_dt)
+
+    # Last resort: single-sample approximation
+    return float(cmd.sum())
+
+
+def print_delivery_summary(t_mpc, insulin_rate, glucagon_rate):
+    t = np.asarray(t_mpc, dtype=float)
+    I = np.asarray(insulin_rate, dtype=float)
+    Gg = np.asarray(glucagon_rate, dtype=float)
+
+    if t.size < 2:
+        print("Not enough samples to compute delivery.")
+        return
+
+    duration_min = float(t[-1] - t[0]) + float(np.median(np.diff(t)))
+    duration_hours = duration_min / 60.0
+
+    insulin_total_mU = integrate_command(t, I)
+    insulin_total_U = insulin_total_mU / 1000.0
+
+    glucagon_total_mg = integrate_command(t, Gg)
+    glucagon_total_ug = glucagon_total_mg * 1000.0
+
+    print("\n----- Delivery summary -----")
+    print(f"Simulation duration: {duration_min:.1f} min ({duration_hours:.2f} h)")
+    print(f"Insulin total: {insulin_total_U:.3f} U")
+    print(f"Glucagon total: {glucagon_total_mg:.4f} mg ({glucagon_total_ug:.1f} µg)")
+    print("----------------------------\n")
+
+
+
+
+
 # Closed-loop simulation
 def run_closed_loop(sim_duration_min=2000):
 
@@ -590,7 +652,8 @@ def run_closed_loop(sim_duration_min=2000):
 
     # --- call evaluator with the correct dt_minutes ---
     res = evaluate_glucose_trace(glucose_trimmed, dt_minutes=dt_minutes)
-
+    
+    print_delivery_summary(t_mpc, insulin, glucagon_inf)
     print("Final composite J (trimmed):", res['J'])
     
     # return numeric arrays (safer for later scaling / plotting)
