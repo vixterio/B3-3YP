@@ -41,7 +41,7 @@ from scipy import signal
 import cvxpy as cp
 
 
-# Paper constants / specs
+# Constants / specs
 TAU_S_MIN = 5.0           # sampling time (min)
 R_SETPOINT = 90.0         # mg/dL
 NP = 25                   # prediction horizon
@@ -148,7 +148,8 @@ class MPCController:
     # store in structure,
     def __init__(self, A_d, B_d, C, tau_s_min,
                  Np=NP, Nc=NC,
-                 lambda_u=None):
+                 lambda_u=None,
+                 u_star=None):
         A_d = np.asarray(A_d, dtype=float)
         B_d = np.asarray(B_d, dtype=float)
         C = np.asarray(C, dtype=float)
@@ -185,6 +186,11 @@ class MPCController:
         self.lambda_u = np.asarray(lambda_u, dtype=float)
         if self.lambda_u.ndim == 1:
             self.lambda_u = np.diag(self.lambda_u)
+
+        if u_star is None:
+            self.u_star = np.zeros((2,), dtype=float)
+        else:
+            self.u_star = np.asarray(u_star, dtype=float).reshape((2,))
 
         self._build_prediction_matrices()
 
@@ -252,6 +258,8 @@ class MPCController:
 
         uk_prev_repeat = np.tile(uk_prev, Nc).reshape((-1, 1))
         u_seq = uk_prev_repeat + T @ deltaU
+        u_star_repeat = np.tile(self.u_star, Nc).reshape((-1, 1))
+        u_abs_seq = u_seq + u_star_repeat
 
         Gamma_T = self.Gamma @ T
         Gamma_u0 = self.Gamma @ uk_prev_repeat
@@ -310,15 +318,15 @@ class MPCController:
 
         for i in range(Nc):
             constraints += [
-                u_seq[i*m + 0, 0] >= umin_mode[0],
-                u_seq[i*m + 0, 0] <= umax_mode[0],
-                u_seq[i*m + 1, 0] >= umin_mode[1],
-                u_seq[i*m + 1, 0] <= umax_mode[1],
+                u_abs_seq[i*m + 0, 0] >= umin_mode[0],
+                u_abs_seq[i*m + 0, 0] <= umax_mode[0],
+                u_abs_seq[i*m + 1, 0] >= umin_mode[1],
+                u_abs_seq[i*m + 1, 0] <= umax_mode[1],
             ]
 
         # Soft output bounds
         constraints += [
-            Y_pred >= y_min_dev - s,
+            Y_pred >= y_min_dev ,
             Y_pred <= y_max_dev + s
         ]
 
