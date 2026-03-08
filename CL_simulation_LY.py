@@ -1,82 +1,86 @@
 """
 CL_simulation_LY.py
 
-Closed-loop simulation of a dual-hormone MPC controller applied to the
-nonlinear Sorensen glucose–insulin–glucagon model under physiologically
-realistic disturbances.
+Closed-loop simulation of a dual-hormone (insulin + glucagon) MPC controller
+applied to the nonlinear Sorensen glucose–insulin–glucagon model under
+physiologically realistic disturbances.
 
-This script evaluates the performance and limitations of a fixed linear
-Model Predictive Controller augmented with an output disturbance model when subjected to unannounced meals modelled
-using explicit glucose absorption dynamics.
+Architecture overview:
 
-System formulation:
+Plant:
+    Nonlinear Sorensen model (19 states) with optional gut glucose reservoir
+    state for meal absorption dynamics.
 
-    Nonlinear plant (Sorensen model):
-        ẋ = f(x, u, d)
+Controller:
+    Linear time-invariant MPC based on a single linearisation of the Sorensen
+    model around a nominal basal operating point (~90 mg/dL).
+    The MPC is augmented with an output disturbance state for offset-free
+    tracking.
 
-    Linear prediction model used by MPC:
-        x_{k+1} = A x_k + B u_k
-        d_{k+1} = d_k
-        y_k     = C x_k + d_k
+Prediction model:
+    x_{k+1} = A x_k + B u_k
+    d_{k+1} = d_k
+    y_k     = C x_k + d_k
 
 where:
-- x represents the nonlinear Sorensen physiological state
-- u = [u1, u2] are insulin and glucagon infusion rates
-- y is the peripheral glucose measurement (G_PI)
-- d represents an unmeasured, persistent output disturbance accounting for
-  modelling errors, unannounced meals, and physiological mismatch
+    x  = deviation state (linearised model)
+    u  = [u_insulin, u_glucagon]
+    y  = peripheral glucose (G_PI)
+    d  = estimated output disturbance
 
-Key characteristics of this simulation:
-- Meals are modelled explicitly using a gut glucose reservoir with
-  first-order absorption dynamics, producing delayed and nonlinear
-  glucose appearance in the nonlinear plant.
-- The MPC relies on a single linearisation of the Sorensen model
-  around a nominal basal operating point (approximately 90 mg/dL).
-- Unannounced disturbances are not modelled explicitly in the MPC
-  prediction model, but are compensated using a disturbance-augmented
-  (offset-free) formulation with an online disturbance estimate.
-- Feedback to the controller is provided solely via peripheral glucose
-  measurements (G_PI).
-- Supervisory logic switches between insulin-only, basal, and glucagon-only
-  control modes based on glucose thresholds.
+Supervisory logic:
+    - Three operating modes: BASAL, BOLUS (insulin-dominant), GLUCAGON.
+    - Mode selection based on glucose thresholds and predictive hypo
+      protection using short-horizon linear prediction.
+    - In GLUCAGON mode, insulin is disabled.
+    - In BASAL/BOLUS modes, glucagon is disabled.
 
-This script can be run with 3 different disturbance configurations (set by DISTURBANCE_CASE):
-1) Multi-meal day with per-meal absorption (physiological, Sorensen + gut reservoir).
-2) Exercise disturbance implemented ONLY in this simulation file:
-   - glucose sink term (extra uptake) + effective insulin scaling (increased sensitivity).
-3) Limit case: large slow meal + exercise + temporary insulin delivery cap (fault/saturation).
-4) Single meal test to observe steady state response 
+Safety layer:
+    - Predictive hypo protection using short forward simulation of the
+      linear model.
+    - Hard non-negativity constraints on pump commands.
+    - Optional basal micro-pulse overlay to mimic pump basal delivery.
+    - Optional temporary insulin cap faults (case-dependent).
+
+Disturbances:
+    - Explicit meal appearance via first-order gut absorption.
+    - Optional exercise disturbance via glucose sink and temporary
+      insulin sensitivity scaling.
+    - Optional insulin delivery limitation (fault scenario).
+
+Performance evaluation:
+    Composite glucose metric (J) computed after excluding initial
+    transient period.
+
+This script is intended for controlled evaluation of supervisory logic,
+offset-free MPC behaviour, and disturbance rejection performance under
+realistic multi-meal and exercise scenarios.
 """
 
 # DISTURBANCE SELECTION
+#
+# 1) Multi-meal day (physiological test case)
+#    - Four meals with varying carbohydrate amounts and absorption time constants.
+#
+# 2) Exercise disturbance case
+#    - Single moderate meal.
+#    - Moderate exercise (glucose sink + temporary sensitivity increase).
+#
+# 3) Stress-test compound disturbance
+#    - Large slow-absorbing meal.
+#    - Exercise session following meal.
+#    - Temporary insulin delivery cap (simulated pump fault).
+#
+# 4) Single-meal steady-state response test
+#    - One moderate meal.
+#    - Used to assess isolated postprandial control behaviour.
+#
+# Disturbances are implemented in the nonlinear plant only.
+# The MPC does not explicitly model meals or exercise.
+# Offset-free disturbance estimation compensates for mismatch.
+
 DISTURBANCE_CASE = 1
-# 1: realistic multi-meal day (Sorensen + gut reservoir with per-meal Kabs)
-# 2: exercise disturbance (implemented in simulation file only)
-# 3: near-breaking compound: huge slow meal + exercise + insulin cap fault
-# 4: single meal test to observe steady state
 
-# Disturbance configurations and specifications for each case
-# Case 1 (multi-meal day):
-#  - breakfast 45g fast absorption (tau ~ 30 min)
-#  - lunch     80g medium absorption (tau ~ 55 min)
-#  - snack     20g fast absorption (tau ~ 25 min)
-#  - dinner    70g slow absorption (tau ~ 80 min; high fat)
-
-# Case 2 (exercise):
-#  - moderate exercise 45 min (e.g. brisk walk / bike) starting at t=600 min
-#  - extra uptake sink ~ 40 mg/min ramping up/down
-#  - increased insulin sensitivity:
-#       +30% during exercise,
-#       then decays with ~120 min time constant (post-exercise effect)
-
-# Case 3 (limit case):
-#  - huge dinner 140g with very slow absorption (tau ~ 95 min)
-#  - exercise 60 min starting 60 min after dinner
-#  - insulin delivery cap fault: insulin max reduced to 0.6 mU/min for 90 min
-#    (temporary occlusion / max-delivery limitation)
-
-# Case 4 (single meal): 
-#  - single 60g meal with moderate absorption (tau ~ 45 min) at t=250 min
 
 
 DISTURBANCE_CONFIG = {
