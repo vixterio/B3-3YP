@@ -1,0 +1,860 @@
+import numpy as np
+from dataclasses import dataclass
+from scipy.optimize import minimize
+import matplotlib.pyplot as plt
+import performance_metrics as perf
+# ============================================================
+# 1) BI-HORMONAL HOVORKA-STYLE MODEL (insulin + glucagon)
+#    States:
+#      [Q1,Q2,x1,x2,x3,S1,S2,I,D1,D2,G1,G2,Gp,xg]
+#    Controls:
+#      u_ins  [mU/min]  (basal + bolus allowed)
+#      u_gluc [ug/min]
+#    Disturbance:
+#      d_cho  [g/min]
+# ============================================================
+
+@dataclass
+class BiHovorkaParams:
+    # body / volumes
+    BW: float = 70.0
+    MwG: float = 180.1577
+    VG: float = None
+    VI: float = None
+
+    # glucose/insulin kinetics (common Hovorka-style values)
+    k12: float = 0.066
+    ka1: float = 0.006
+    ka2: float = 0.06
+    ka3: float = 0.03
+    kb1: float = 3.07e-5
+    kb2: float = 4.92e-5
+    kb3: float = 0.0016
+    tauS: float = 55.0
+    ke: float = 0.138
+
+    # gut absorption
+    tD: float = 40.0
+    AG: float = 0.8
+
+    # basal production/consumption (scaled with body weight)
+    EGP0: float = None
+    F01: float = None
+
+    # --- Glucagon subsystem (simplified, assumed) ---
+    tauG: float = 20.0     # SC absorption time constant [min]
+    keG: float = 0.10      # plasma clearance [1/min]
+    VGg: float = 15.0      # effective glucagon distribution volume [L]
+    kbg: float = 0.01      # action drive gain (increased vs tiny default)
+    kag: float = 0.03      # action decay [1/min]
+    kEGP_G: float = 2.0    # glucagon action -> added EGP gain [mmol/min per xg]
+
+    def __post_init__(self):
+        if self.VG is None:
+            self.VG = 0.16 * self.BW
+        if self.VI is None:
+            self.VI = 0.12 * self.BW
+        if self.EGP0 is None:
+            self.EGP0 = 0.0161 * self.BW
+        if self.F01 is None:
+            self.F01 = 0.0097 * self.BW
+
+
+def bihovorka_rhs(x, u_ins, u_gluc, d_cho, p: BiHovorkaParams, exercise_sink_mmol_min: float = 0.0):
+    Q1,Q2,x1,x2,x3,S1,S2,I,D1,D2,G1,G2,Gp,xg = x
+
+    # glucose concentration (mmol/L)
+    G = Q1 / p.VG
+
+    # insulin-independent utilization
+    F01c = p.F01 if G >= 4.5 else p.F01 * G / 4.5
+
+    # renal clearance
+    FR = 0.003*(G-9.0)*p.VG if G >= 9.0 else 0.0
+
+    # meal -> gut appearance
+    D_mmol = 1000.0/p.MwG * d_cho
+    dD1 = p.AG * D_mmol - D1/p.tD
+    dD2 = (D1 - D2)/p.tD
+    UG  = D2/p.tD  # mmol/min
+
+    # glucagon SC absorption -> plasma -> action
+    dG1 = u_gluc - G1/p.tauG
+    dG2 = (G1 - G2)/p.tauG
+    UGG = G2/p.tauG
+    dGp = UGG/p.VGg - p.keG*Gp
+    dxg = p.kbg*Gp - p.kag*xg
+
+    # glucose kinetics
+    R12 = Q1*x1 - p.k12*Q2
+    R2  = Q2*x2
+    EGP = p.EGP0*(1.0 - x3) + p.kEGP_G*xg
+
+    # Exercise sink: subtract from Q1 dynamics (mmol/min), nonnegative.
+    ex_sink = max(0.0, float(exercise_sink_mmol_min))
+    dQ1 = UG - F01c - FR - R12 + EGP - ex_sink
+    dQ2 = R12 - R2
+
+    # insulin action
+    dx1 = p.kb1*I - p.ka1*x1
+    dx2 = p.kb2*I - p.ka2*x2
+    dx3 = p.kb3*I - p.ka3*x3
+
+    # insulin SC absorption -> plasma
+    dS1 = u_ins - S1/p.tauS
+    dS2 = (S1 - S2)/p.tauS
+    UI  = S2/p.tauS
+    dI  = UI/p.VI - p.ke*I
+
+    return np.array([dQ1,dQ2,dx1,dx2,dx3,dS1,dS2,dI,dD1,dD2,dG1,dG2,dGp,dxg])
+
+
+def step_euler(x, u_ins, u_gluc, d, p, dt, exercise_sink_mmol_min: float = 0.0):
+    x_next = x + dt*bihovorka_rhs(x, u_ins, u_gluc, d, p, exercise_sink_mmol_min=exercise_sink_mmol_min)
+    # keep amount-like compartments nonnegative
+    for idx in [0,1,5,6,8,9,10,11,12]:
+        x_next[idx] = max(0.0, x_next[idx])
+    return x_next
+
+
+def bg_mgdl(x, p):
+    return 18.0*(x[0]/p.VG)
+
+
+# ============================================================
+# 2) MEAL SIMULATION (unannounced)
+# ============================================================
+
+@dataclass
+class MealEvent:
+    start_min: float
+    carbs_g: float
+    duration_min: float = 30.0
+
+
+def generate_regular_day_meals(rng):
+    # breakfast/lunch/dinner with uncertainty windows
+    nom = np.array([7*60, 12*60, 18*60], float)
+    win = np.array([30, 60, 120], float)    # ±15, ±30, ±60 minutes
+    carbs = np.array([60, 75, 80], float)
+
+    meals=[]
+    for t0,w,c in zip(nom,win,carbs):
+        meals.append(MealEvent(t0 + rng.uniform(-w/2, w/2), c, 30.0))
+    meals.sort(key=lambda m:m.start_min)
+    return meals
+
+
+def meal_profile(meals, dt, N):
+    d=np.zeros(N)
+    for m in meals:
+        k0=int(np.floor(m.start_min/dt))
+        k1=int(np.ceil((m.start_min+m.duration_min)/dt))
+        k0=max(0,k0); k1=min(N,k1)
+        d[k0:k1]+=m.carbs_g/m.duration_min  # g/min
+    return d
+
+
+# ============================================================
+# 3) "TRAIN" MEAL-TIME PREDICTOR
+#    p(j) = Prob(next meal starts j steps ahead (0..hf-1) or hf=no meal
+#    conditioned on (time step of day) + (recent meal within 2h flag)
+# ============================================================
+
+def train_meal_prob_table(num_days, dt, hf, seed=0):
+    rng=np.random.default_rng(seed)
+    N=int(24*60/dt)
+    counts=np.ones((N,2,hf+1))*1e-3  # tiny prior
+
+    for _ in range(num_days):
+        meals=generate_regular_day_meals(rng)
+        starts=[m.start_min for m in meals]
+        for k in range(N):
+            t=k*dt
+            last=max([s for s in starts if s<=t], default=-1e9)
+            recent=1 if (t-last)<=120.0 else 0
+
+            nxt=min([s for s in starts if s>t], default=np.inf)
+            if np.isfinite(nxt):
+                off=int(np.floor((nxt-t)/dt))
+                idx=off if off<=hf else hf
+            else:
+                idx=hf
+            counts[k,recent,idx]+=1.0
+
+    return counts/counts.sum(axis=2, keepdims=True)
+
+
+# ============================================================
+# 4) LINEARIZATION + SCENARIO-BASED SMPC (insulin + glucagon)
+# ============================================================
+
+def linearize_discrete(x0, u0, g0, d0, p, dt, eps=1e-6):
+    n=len(x0)
+    f0=bihovorka_rhs(x0,u0,g0,d0,p)
+
+    A=np.zeros((n,n))
+    for i in range(n):
+        dx=np.zeros(n); dx[i]=eps
+        f1=bihovorka_rhs(x0+dx,u0,g0,d0,p)
+        A[:,i]=(f1-f0)/eps
+
+    Bu=((bihovorka_rhs(x0,u0+eps,g0,d0,p)-f0)/eps).reshape(n,1)
+    Bg=((bihovorka_rhs(x0,u0,g0+eps,d0,p)-f0)/eps).reshape(n,1)
+    Bd=((bihovorka_rhs(x0,u0,g0,d0+eps,p)-f0)/eps).reshape(n,1)
+
+    Ad=np.eye(n)+dt*A
+    Bud=dt*Bu; Bgd=dt*Bg; Bdd=dt*Bd
+
+    c = x0 + dt*f0 - Ad@x0 - Bud.flatten()*u0 - Bgd.flatten()*g0 - Bdd.flatten()*d0
+    return Ad,Bud,Bgd,Bdd,c
+
+
+def scenario_meal_sequences(hf, dt, carbs, dur_min=30.0):
+    dur_steps=int(np.ceil(dur_min/dt))
+    rate=carbs/dur_min if carbs>0 else 0.0
+    seqs=[]
+    for j in range(hf+1):
+        d=np.zeros(hf)
+        if j<hf and carbs>0:
+            d[j:min(hf,j+dur_steps)]=rate
+        seqs.append(d)
+    return seqs
+
+
+def build_output_sensitivity(Ad, Bud, Bgd, C, hf):
+    n=Ad.shape[0]
+    Su=np.zeros((hf,hf)); Sg=np.zeros((hf,hf))
+    Pu=np.zeros((n,hf)); Pg=np.zeros((n,hf))
+    for i in range(hf):
+        Pu=Ad@Pu; Pg=Ad@Pg
+        Pu[:,i]+=Bud.flatten(); Pg[:,i]+=Bgd.flatten()
+        Su[i,:]=(C@Pu).flatten()
+        Sg[i,:]=(C@Pg).flatten()
+    return Su,Sg
+
+
+def simulate_linear_output(x0, Ad, Bud, Bgd, Bdd, c, C, U, Gc, d_seq):
+    hf=len(U)
+    x=x0.copy()
+    y=np.zeros(hf)
+    for i in range(hf):
+        x = Ad@x + Bud.flatten()*U[i] + Bgd.flatten()*Gc[i] + Bdd.flatten()*d_seq[i] + c
+        y[i]=float(C@x)
+    return y
+
+
+def smpc_control(xk, u_prev, g_prev, p_vec, dt, hf, p: BiHovorkaParams, weights, warm=None):
+    # expected meal size by coarse time-of-day bucket (timing comes from p_vec scenarios)
+    t_min=weights["t_min"]
+    if t_min < 10*60: carbs=60.0
+    elif t_min < 15*60: carbs=75.0
+    elif t_min < 22*60: carbs=80.0
+    else: carbs=0.0
+
+    Ad,Bud,Bgd,Bdd,c = linearize_discrete(xk,u_prev,g_prev,0.0,p,dt)
+
+    # output BG depends on Q1: mg/dL = 18/VG * Q1
+    C=np.zeros((1,len(xk))); C[0,0]=18.0/p.VG
+
+    d_scen=scenario_meal_sequences(hf,dt,carbs,30.0)
+    Su,Sg=build_output_sensitivity(Ad,Bud,Bgd,C,hf)
+
+    Ubar=np.full(hf,u_prev)      # baseline insulin (previous)
+    Gbar=np.zeros(hf)            # baseline glucagon 0
+
+    y_base=np.array([simulate_linear_output(xk,Ad,Bud,Bgd,Bdd,c,C,Ubar,Gbar,ds) for ds in d_scen])
+
+    # cost weights / constraints
+    Q=weights["Q"]; w_lo=weights["w_lo"]; w_hi=weights["w_hi"]; ref=weights["ref"]
+    Ru=weights["Ru"]; Rg=weights["Rg"]; dRu=weights["dRu"]; dRg=weights["dRg"]; Rc=weights["Rc"]
+    u_max=weights["u_max"]; g_max=weights["g_max"]
+    u_tgt=weights["u_target"]  # basal target
+
+    # smoothing matrices
+    D=np.zeros((hf,hf)); D[0,0]=1.0
+    for i in range(1,hf):
+        D[i,i]=1.0; D[i,i-1]=-1.0
+    d0u=np.zeros(hf); d0u[0]=-u_prev
+    d0g=np.zeros(hf); d0g[0]=-g_prev
+
+    def unpack(z): return z[:hf], z[hf:]
+
+    # Decision vector z = [U(0..hf-1), G(0..hf-1)]
+    def obj_grad(z):
+        U,Gc=unpack(np.asarray(z))
+
+        dU=U-Ubar
+        dG=Gc-Gbar
+        Y=y_base + (Su@dU + Sg@dG).reshape(1,hf)
+
+        err=Y-ref
+        low=np.maximum(0.0, 90.0 - Y)
+        high=np.maximum(0.0, Y - 110.0)
+
+        # expected (scenario-weighted) glucose cost
+        J_s = Q*np.sum(err**2,axis=1) + w_lo*np.sum(low**2,axis=1) + w_hi*np.sum(high**2,axis=1)
+        J_y = float(np.dot(p_vec,J_s))
+
+        # insulin (basal+bolus): penalize deviation from basal + changes
+        J_u = Ru*np.sum((U-u_tgt)**2) + dRu*np.sum((D@U+d0u)**2)
+
+        # glucagon base cost: magnitude + changes (prefer 0 unless needed)
+        J_g = Rg*np.sum(Gc**2) + dRg*np.sum((D@Gc+d0g)**2)
+
+        # discourage simultaneous insulin+glucagon (wasteful)
+        J_c = Rc*np.sum((U-u_tgt)*Gc)
+
+        # NEW: extra glucagon penalty when glucose is already safe/high.
+        # If BG > 110, we add a small extra cost on glucagon usage so it is mainly reserved for low BG.
+        high_bg = np.maximum(0.0, Y - 110.0)        # shape (n_scen,hf)
+        J_g_extra = 1e-5 * np.sum(high_bg * (Gc[np.newaxis,:]**2))
+        # This term is tiny compared to w_lo hypo penalty but nudges the optimizer away from "always-on" glucagon.
+
+        J = J_y + J_u + J_g + J_c + J_g_extra
+
+        # gradients
+        dJdY = 2*Q*err - 2*w_lo*low + 2*w_hi*high
+        dJdY_exp=(p_vec.reshape(-1,1)*dJdY).sum(axis=0)  # shape (hf,)
+
+        gradU = Su.T@dJdY_exp + 2*Ru*(U-u_tgt) + 2*dRu*(D.T@(D@U+d0u)) + Rc*Gc
+        # derivative of J_g_extra wrt Gc: 2 * 1e-5 * sum_s high_bg_s,i * Gc_i
+        dJg_extra_dG = 2e-5 * (high_bg.mean(axis=0) * Gc)  # small correction term
+        gradG = Sg.T@dJdY_exp + 2*Rg*Gc + 2*dRg*(D.T@(D@Gc+d0g)) + Rc*(U-u_tgt) + dJg_extra_dG
+
+        return J, np.concatenate([gradU,gradG])
+
+    def fun(z): return obj_grad(z)[0]
+    def jac(z): return obj_grad(z)[1]
+
+    if warm is None:
+        z0=np.concatenate([Ubar,Gbar])
+    else:
+        z0=warm
+
+    bounds=[(0.0,u_max)]*hf + [(0.0,g_max)]*hf
+    res=minimize(fun,z0,jac=jac,method="L-BFGS-B",bounds=bounds,
+                 options={"maxiter":weights["maxiter"],"ftol":1e-9})
+
+    Uopt,Gopt=unpack(res.x)
+
+    # Enforce no simultaneous insulin and glucagon before quantization
+    for i in range(hf):
+        if Uopt[i] > 0.0 and Gopt[i] > 0.0:
+            if Uopt[i] >= Gopt[i]:
+                Gopt[i] = 0.0
+            else:
+                Uopt[i] = 0.0
+
+    # ------------------------------------------------------------------
+    # QUANTIZE INSULIN TO A FIXED GRID (MULTIPLE LEVELS, NOT CONTINUOUS)
+    # ------------------------------------------------------------------
+    # Build an insulin grid around the basal level, up to u_max, with fine resolution.
+    u_max = float(weights["u_max"])
+    # Choose step as 1/40 of u_max (e.g. 8000 -> 200 mU/min). Adjust if needed.
+    du = max(u_max / 40.0, 1.0)
+    insulin_levels = np.arange(0.0, u_max + 0.5 * du, du, dtype=float)
+
+    # Snap each horizon insulin input to the nearest grid point.
+    U_quant = np.zeros_like(Uopt)
+    for i in range(hf):
+        # clip to bounds then quantize
+        u_i = np.clip(Uopt[i], 0.0, u_max)
+        idx = int(np.argmin(np.abs(insulin_levels - u_i)))
+        U_quant[i] = float(insulin_levels[idx])
+    Uopt = U_quant
+
+    # ------------------------------------------------------------------
+    # Glucagon post-processing as before: binary-ish on/off
+    # ------------------------------------------------------------------
+    pos_g = Gopt[Gopt > 1e-9]
+    if pos_g.size > 0:
+        g_on = float(np.median(pos_g))
+    else:
+        g_on = 0.0
+
+    G_levels = np.zeros_like(Gopt)
+    if g_on > 0.0:
+        for i in range(hf):
+            G_levels[i] = g_on if Gopt[i] >= 0.5 * g_on else 0.0
+    Gopt = G_levels
+
+    # Final: do not allow insulin and glucagon at same time after quantization
+    for i in range(hf):
+        if Uopt[i] > 0.0 and Gopt[i] > 0.0:
+            # Prefer insulin; use glucagon only when insulin is off
+            Gopt[i] = 0.0
+
+    # Warm-start shift
+    warm_next=np.concatenate([
+        np.concatenate([Uopt[1:],[Uopt[-1]]]),
+        np.concatenate([Gopt[1:],[Gopt[-1]]])
+    ])
+
+    return float(Uopt[0]), float(Gopt[0]), warm_next
+
+
+# ============================================================
+# 5) DAY SIMULATION (24h) + basal computation
+# ============================================================
+
+def find_basal_insulin(p: BiHovorkaParams, target_mmol=5.5):
+    # crude bisection to get a basal rate that roughly holds G at target with no meals/glucagon
+    def residual(u):
+        G=target_mmol
+        Q1=G*p.VG
+        I=u/(p.ke*p.VI)
+        x1=p.kb1/p.ka1*I
+        x2=p.kb2/p.ka2*I
+        x3=p.kb3/p.ka3*I
+        Q2=Q1*x1/(p.k12+x2)
+        R12 = Q1*x1 - p.k12*Q2
+        return (p.EGP0*(1-x3) - p.F01) - R12
+
+    a,b=0.1,400.0
+    fa,fb=residual(a), residual(b)
+    for _ in range(10):
+        if fa*fb<=0: break
+        b*=2; fb=residual(b)
+
+    for _ in range(60):
+        m=0.5*(a+b); fm=residual(m)
+        if fa*fm<=0: b=m; fb=fm
+        else: a=m; fa=fm
+    return 0.5*(a+b)
+
+
+def simulate_day(
+    seed,
+    p_table,
+    dt,
+    hf,
+    p: BiHovorkaParams,
+    weights,
+    meals_override=None,
+    exercise_sink_override=None,
+):
+    rng=np.random.default_rng(seed)
+    N=int(24*60/dt)
+
+    meals = generate_regular_day_meals(rng) if meals_override is None else list(meals_override)
+    d=meal_profile(meals,dt,N)
+    starts=[m.start_min for m in meals]
+
+    if exercise_sink_override is None:
+        ex_sink = np.zeros(N, dtype=float)
+    else:
+        ex_sink = np.asarray(exercise_sink_override, dtype=float).reshape(-1)
+        if ex_sink.size < N:
+            ex_sink = np.pad(ex_sink, (0, N - ex_sink.size), mode="constant")
+        else:
+            ex_sink = ex_sink[:N]
+        ex_sink = np.maximum(0.0, ex_sink)
+
+    # basal
+    u_basal=find_basal_insulin(p,5.5)
+
+    # init near equilibrium around 99 mg/dL
+    G0=5.5
+    Q1=G0*p.VG
+    I=u_basal/(p.ke*p.VI)
+    x1=p.kb1/p.ka1*I
+    x2=p.kb2/p.ka2*I
+    x3=p.kb3/p.ka3*I
+    Q2=Q1*x1/(p.k12+x2)
+    S1=u_basal*p.tauS; S2=S1
+
+    # glucagon states start at 0
+    x=np.array([Q1,Q2,x1,x2,x3,S1,S2,I,0.0,0.0,0.0,0.0,0.0,0.0],float)
+
+    bg=np.zeros(N+1)
+    u=np.zeros(N); g=np.zeros(N)
+    basal=np.full(N,u_basal)
+
+    warm=None
+    bg[0]=bg_mgdl(x,p)
+    u_prev=u_basal; g_prev=0.0
+
+    for k in range(N):
+        t=k*dt
+        weights["t_min"]=t
+        weights["u_target"]=u_basal
+
+        # recent-meal flag for predictor
+        last=max([s for s in starts if s<=t], default=-1e9)
+        recent=1 if (t-last)<=120.0 else 0
+        p_vec=p_table[k,recent,:]
+
+        # MPC action (meals unannounced; only predicted via p_vec)
+        u_k,g_k,warm=smpc_control(x,u_prev,g_prev,p_vec,dt,hf,p,weights,warm)
+        u[k]=u_k; g[k]=g_k
+
+        # step true nonlinear plant with true meal d[k]
+        x=step_euler(x, u_k, g_k, d[k], p, dt, exercise_sink_mmol_min=float(ex_sink[k]))
+        bg[k+1]=bg_mgdl(x,p)
+
+        u_prev=u_k; g_prev=g_k
+
+    bolus=np.maximum(0.0, u-basal)   # bolus is “spike above basal”
+    return meals, d, basal, bolus, u, g, bg, u_basal, ex_sink
+
+
+def build_exercise_sink_profile(
+    N: int,
+    dt: float,
+    start_min: float,
+    duration_min: float = 60.0,
+    max_sink_mmol_min: float = 1.6,
+) -> np.ndarray:
+    """
+    Triangular (ramped up/down) exercise glucose sink profile in mmol/min.
+    """
+    sink = np.zeros(N, dtype=float)
+    k0 = int(np.floor(start_min / dt))
+    k1 = int(np.ceil((start_min + duration_min) / dt))
+    k0 = max(0, k0)
+    k1 = min(N, k1)
+    span = max(1, k1 - k0)
+    for i, k in enumerate(range(k0, k1)):
+        r = i / max(1, span - 1)  # 0..1
+        amp = (r / 0.5) if r <= 0.5 else ((1.0 - r) / 0.5)  # triangular
+        sink[k] = max_sink_mmol_min * max(0.0, amp)
+    return sink
+
+
+def build_four_scenarios(dt: float):
+    N = int(24 * 60 / dt)
+
+    # 1) Baseline: 3 meals/day
+    meals1 = [
+        MealEvent(7*60, 60.0, 30.0),
+        MealEvent(12*60, 75.0, 30.0),
+        MealEvent(18*60, 80.0, 30.0),
+    ]
+    ex1 = np.zeros(N, dtype=float)
+
+    # 2) Same meals + 1h exercise immediately after 2nd meal
+    meals2 = meals1
+    ex2_start = meals2[1].start_min + meals2[1].duration_min
+    ex2 = build_exercise_sink_profile(N, dt, ex2_start, duration_min=60.0, max_sink_mmol_min=1.6)
+
+    # 3) Large slow-absorbing 2nd meal + immediate exercise
+    meals3 = [
+        MealEvent(7*60, 60.0, 30.0),
+        MealEvent(12*60, 140.0, 120.0),  # large + slow absorption
+        MealEvent(18*60, 80.0, 30.0),
+    ]
+    ex3_start = meals3[1].start_min + meals3[1].duration_min
+    ex3 = build_exercise_sink_profile(N, dt, ex3_start, duration_min=60.0, max_sink_mmol_min=1.8)
+
+    # 4) Only 2 meals at unlikely times
+    meals4 = [
+        MealEvent(4*60 + 30, 70.0, 35.0),
+        MealEvent(22*60 + 20, 95.0, 40.0),
+    ]
+    ex4 = np.zeros(N, dtype=float)
+
+    return [
+        {"name": "Scenario 1: 3 meals/day (baseline)", "meals": meals1, "ex": ex1},
+        {"name": "Scenario 2: 3 meals + exercise after meal 2", "meals": meals2, "ex": ex2},
+        {"name": "Scenario 3: large slow meal 2 + exercise", "meals": meals3, "ex": ex3},
+        {"name": "Scenario 4: 2 unlikely-time meals", "meals": meals4, "ex": ex4},
+    ]
+
+
+def glucose_range_metrics(
+    glucose_mg_dL: np.ndarray,
+    time_min: np.ndarray,
+    *,
+    low: float = 70.0,
+    high: float = 180.0,
+    trim_min: float = 200.0,
+):
+    """
+    Returns (tir, tbr, tar) as fractions in [0,1].
+    TIR: [low, high], TBR: < low, TAR: > high.
+    """
+    g = np.asarray(glucose_mg_dL, dtype=float).reshape(-1)
+    t = np.asarray(time_min, dtype=float).reshape(-1)
+    n = min(g.size, t.size)
+    if n < 2:
+        return 0.0, 0.0, 0.0
+    g = g[:n]
+    t = t[:n]
+
+    keep = t >= float(trim_min)
+    g = g[keep]
+    t = t[keep]
+    if g.size < 2:
+        return 0.0, 0.0, 0.0
+
+    dt = np.diff(t)
+    dt = np.maximum(np.where(np.isfinite(dt), dt, 0.0), 0.0)
+    if dt.size == 0:
+        return 0.0, 0.0, 0.0
+    dt = np.concatenate([dt, [dt[-1] if dt[-1] > 0 else 1.0]])
+    T = float(dt.sum())
+    if T <= 0.0:
+        return 0.0, 0.0, 0.0
+
+    in_range = (g >= low) & (g <= high)
+    below = g < low
+    above = g > high
+
+    tir = float(np.clip(np.sum(dt[in_range]) / T, 0.0, 1.0))
+    tbr = float(np.clip(np.sum(dt[below]) / T, 0.0, 1.0))
+    tar = float(np.clip(np.sum(dt[above]) / T, 0.0, 1.0))
+    return tir, tbr, tar
+
+
+def plot_four_scenarios(scenarios_log, dt: float) -> None:
+    fig, axes = plt.subplots(2, 2, figsize=(14, 9), sharex=True, sharey=True)
+    axes = axes.flatten()
+
+    for ax, s in zip(axes, scenarios_log):
+        bg = s["bg"]
+        tbg = np.arange(bg.size, dtype=float) * dt / 60.0
+        ax.plot(tbg, bg, color="tab:brown", lw=1.8)
+
+        ax.axhline(70, linestyle="--", color="red", alpha=0.8)
+        ax.axhline(90, linestyle="--", color="gray", alpha=0.7)
+        ax.axhline(110, linestyle="--", color="gray", alpha=0.7)
+        ax.axhline(180, linestyle="--", color="gray", alpha=0.5)
+
+        # Meal windows
+        for m in s["meals"]:
+            ax.axvspan(m.start_min/60.0, (m.start_min + m.duration_min)/60.0, color="orange", alpha=0.12)
+
+        # Exercise window (if any)
+        ex_idx = np.where(s["ex"] > 1e-12)[0]
+        if ex_idx.size > 0:
+            ex_start_hr = (ex_idx[0] * dt) / 60.0
+            ex_end_hr = ((ex_idx[-1] + 1) * dt) / 60.0
+            ax.axvspan(ex_start_hr, ex_end_hr, color="cyan", alpha=0.12)
+
+        ax.set_title(
+            f'{s["name"]}\n'
+            f'J={s["J"]:.3f}, '
+            f'TIR={100*s["TIR"]:.1f}%, TBR={100*s["TBR"]:.1f}%, TAR={100*s["TAR"]:.1f}%\n'
+            f'Ins={s["total_insulin_mU"]:.0f} mU, Glu={s["total_glucagon_ug"]:.1f} ug',
+            fontsize=10
+        )
+        ax.set_xlabel("Time (h)")
+        ax.set_ylabel("BG (mg/dL)")
+
+    fig.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# 6) MAIN RUN
+# ============================================================
+
+def clinical_glucose_cost(
+    glucose_mg_dL: np.ndarray,
+    time_min: np.ndarray,
+    *,
+    w_mean: float,
+    w_TIR: float,
+    w_TBR: float,
+    w_var: float,
+    trim_min: float = 200.0,
+) -> float:
+    """
+    Compute a scalar clinical cost J in [0,1] from a glucose time series using:
+      - mean glucose penalty
+      - time-in-range penalty (70-180)
+      - time-below-range penalty (<70)
+      - variability penalty (std dev)
+
+    All sub-scores are clamped to [0,1]. Weights are normalized to sum to 1.
+    """
+    g = np.asarray(glucose_mg_dL, dtype=float).reshape(-1)
+    t = np.asarray(time_min, dtype=float).reshape(-1)
+
+    # Basic validation / alignment
+    n = min(g.size, t.size)
+    if n == 0:
+        return 1.0
+    g = g[:n]
+    t = t[:n]
+
+    # Preprocessing: ignore t < trim_min
+    keep = t >= float(trim_min)
+    g = g[keep]
+    t = t[keep]
+    if g.size < 2:
+        # Not enough data to compute time fractions or variability
+        return 1.0
+
+    # --- Weights: normalize to sum to 1 (robust to bad inputs) ---
+    w = np.array([w_mean, w_TIR, w_TBR, w_var], dtype=float)
+    w = np.where(np.isfinite(w), w, 0.0)
+    w = np.maximum(w, 0.0)
+    s = float(w.sum())
+    if s <= 0.0:
+        w = np.array([0.25, 0.25, 0.25, 0.25], dtype=float)
+    else:
+        w = w / s
+    w_mean, w_TIR, w_TBR, w_var = (float(w[0]), float(w[1]), float(w[2]), float(w[3]))
+
+    # --- Time step weights for fractions (handles nonuniform sampling) ---
+    # Use forward differences; last sample gets same dt as the previous to avoid dropping it.
+    dt = np.diff(t)
+    dt = np.where(np.isfinite(dt), dt, 0.0)
+    dt = np.maximum(dt, 0.0)
+    if dt.size == 0:
+        return 1.0
+    dt = np.concatenate([dt, [dt[-1] if dt[-1] > 0 else 1.0]])
+    T = float(dt.sum())
+    if T <= 0.0:
+        return 1.0
+
+    # ============================================================
+    # a) Mean glucose penalty (S_mean) in [0,1]
+    # ============================================================
+    target = 110.0
+    deadband = 5.0
+    mean_g = float(np.mean(g))
+    dev = max(0.0, abs(mean_g - target) - deadband)
+
+    # Normalization assumption:
+    # - deviation >= 50 mg/dL beyond deadband is considered "max penalty" (S_mean=1).
+    #   That maps mean outside ~[55,165] to full penalty.
+    dev_full = 50.0
+    S_mean = float(np.clip(dev / dev_full, 0.0, 1.0))
+
+    # ============================================================
+    # b) Time in Range penalty (S_TIR) in [0,1]
+    # ============================================================
+    in_range = (g >= 70.0) & (g <= 180.0)
+    tir_frac = float(np.sum(dt[in_range]) / T)
+    S_TIR = float(np.clip(1.0 - tir_frac, 0.0, 1.0))
+
+    # ============================================================
+    # c) Time Below Range penalty (S_TBR) in [0,1]
+    # ============================================================
+    below = g < 70.0
+    tbr_frac = float(np.sum(dt[below]) / T)
+    S_TBR = float(np.clip(tbr_frac, 0.0, 1.0))
+
+    # ============================================================
+    # d) Variability penalty (S_var) in [0,1]
+    # ============================================================
+    # Use standard deviation (mg/dL) and map:
+    #   std <= 20 -> 0 penalty
+    #   std >= 60 -> 1 penalty
+    std_g = float(np.std(g))
+    std_lo = 20.0
+    std_hi = 60.0
+    if std_hi <= std_lo:
+        S_var = 1.0
+    else:
+        S_var = float(np.clip((std_g - std_lo) / (std_hi - std_lo), 0.0, 1.0))
+
+    # Final bounded weighted sum
+    J = w_mean * S_mean + w_TIR * S_TIR + w_TBR * S_TBR + w_var * S_var
+    return float(np.clip(J, 0.0, 1.0))
+
+
+if __name__ == "__main__":
+    dt=5.0
+    hf=36  # longer horizon helps anticipate meals
+
+    p=BiHovorkaParams()
+
+    # Train meal-time predictor on "regular days"
+    p_table=train_meal_prob_table(num_days=300, dt=dt, hf=hf, seed=0)
+
+    # MPC weights: push harder against high BG (up to 160), still very strong hypo protection.
+    weights = dict(
+        Q=4.0,
+        w_lo=8000.0,
+        w_hi=1500.0,
+        ref=100.0,
+        Ru=2e-3,
+        dRu=0.02,
+        Rg=2e-6,
+        dRg=0.05,
+        Rc=1e-4,
+        u_max=8000.0,
+        g_max=3.0,
+        maxiter=25
+    )
+
+    scenarios = build_four_scenarios(dt)
+    scenarios_log = []
+
+    for i, sc in enumerate(scenarios):
+        meals, d, basal, bolus, u, g, bg, u_basal, ex_sink = simulate_day(
+            seed=7 + i,
+            p_table=p_table,
+            dt=dt,
+            hf=hf,
+            p=p,
+            weights=weights,
+            meals_override=sc["meals"],
+            exercise_sink_override=sc["ex"],
+        )
+
+        t_bg = np.arange(bg.size, dtype=float) * dt
+        J = clinical_glucose_cost(
+            bg, t_bg,
+            w_mean=0.10, w_TIR=0.25, w_TBR=0.55, w_var=0.10
+        )
+        tir, tbr, tar = glucose_range_metrics(bg, t_bg, low=70.0, high=180.0, trim_min=200.0)
+
+        scenarios_log.append({
+            "name": sc["name"],
+            "meals": meals,
+            "ex": ex_sink,
+            "bg": bg,
+            "u": u,
+            "g": g,
+            "J": J,
+            "TIR": tir,
+            "TBR": tbr,
+            "TAR": tar,
+            "total_insulin_mU": float(np.sum(u) * dt),
+            "total_glucagon_ug": float(np.sum(g) * dt),
+        })
+
+    # Optional console summary
+    for s in scenarios_log:
+        print(
+            f'{s["name"]}: J={s["J"]:.3f}, '
+            f'TIR={100*s["TIR"]:.1f}%, TBR={100*s["TBR"]:.1f}%, TAR={100*s["TAR"]:.1f}%, '
+            f'total insulin={s["total_insulin_mU"]:.1f} mU, total glucagon={s["total_glucagon_ug"]:.2f} ug'
+        )
+
+    # 4 scenario graphs with costs in titles
+    plot_four_scenarios(scenarios_log, dt)
+
+
+
+eval_weights = {
+    "w_mean": 0.10,
+    "w_TIR": 0.25,
+    "w_TBR": 0.55,
+    "w_var": 0.10
+}
+
+for s in scenarios_log:
+    print(f"\n=== {s['name']} ===")
+
+    t_bg = np.arange(s["bg"].size, dtype=float) * dt
+
+    results = perf.evaluate_glucose_trace(
+        s["bg"],
+        time_min=t_bg,
+        dt_minutes=dt,
+        weights=eval_weights,
+        trim_min=200.0,
+        verbose=True
+    )
+    print("Returned values:")
+    print(f"J = {results['J']:.4f}")
+    print(f"Mean glucose = {results['metrics']['mean_g']:.2f} mg/dL")
+    print(f"TIR = {results['metrics']['pct_TIR']:.2f}%")
+    print(f"TBR = {results['metrics']['pct_TBR']:.2f}%")
+    print(f"TAR = {results['metrics']['pct_TAR']:.2f}%")
